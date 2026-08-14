@@ -282,6 +282,91 @@ function formatByteCount(byteCount) {
   return `${(byteCount / (1_024 * 1_024)).toFixed(1)} MiB`;
 }
 
+function formatTokenCount(tokenCount) {
+  if (tokenCount < 1_000) return String(tokenCount);
+  if (tokenCount < 1_000_000) return `${(tokenCount / 1_000).toFixed(1)}k`;
+  return `${(tokenCount / 1_000_000).toFixed(1)}m`;
+}
+
+function normalizeCodexTokenUsage(rawUsage) {
+  if (!rawUsage || typeof rawUsage !== 'object') return null;
+  const readCount = (field, { required = false } = {}) => {
+    const value = rawUsage[field];
+    if (Number.isSafeInteger(value) && value >= 0) return value;
+    return required ? null : 0;
+  };
+  const inputTokens = readCount('input_tokens', { required: true });
+  const outputTokens = readCount('output_tokens', { required: true });
+  if (inputTokens === null || outputTokens === null) return null;
+  return {
+    inputTokens,
+    cachedInputTokens: readCount('cached_input_tokens'),
+    outputTokens,
+    reasoningOutputTokens: readCount('reasoning_output_tokens'),
+    totalTokens: inputTokens + outputTokens,
+  };
+}
+
+function combineCodexTokenUsage(usages) {
+  const availableUsages = usages.filter(Boolean);
+  if (availableUsages.length === 0) return null;
+  const combined = availableUsages.reduce((total, usage) => ({
+    inputTokens: total.inputTokens + usage.inputTokens,
+    cachedInputTokens: total.cachedInputTokens + usage.cachedInputTokens,
+    outputTokens: total.outputTokens + usage.outputTokens,
+    reasoningOutputTokens: total.reasoningOutputTokens + usage.reasoningOutputTokens,
+  }), {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+  });
+  return {
+    ...combined,
+    totalTokens: combined.inputTokens + combined.outputTokens,
+  };
+}
+
+function parseCodexJsonLines(stdout) {
+  let finalMessage = null;
+  const usages = [];
+  for (const line of stdout.toString('utf8').split(/\r?\n/u).filter(Boolean)) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type === 'turn.completed') {
+      usages.push(normalizeCodexTokenUsage(event.usage));
+    }
+    if (
+      event?.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && typeof event.item.text === 'string'
+    ) {
+      finalMessage = event.item.text;
+    }
+  }
+  return {
+    finalMessage,
+    tokenUsage: combineCodexTokenUsage(usages),
+  };
+}
+
+function formatTokenUsageDetail(usage) {
+  if (!usage) return null;
+  const parts = [`${formatTokenCount(usage.inputTokens)} input`];
+  if (usage.cachedInputTokens > 0) parts.push(`${formatTokenCount(usage.cachedInputTokens)} cached`);
+  parts.push(`${formatTokenCount(usage.outputTokens)} output`);
+  if (usage.reasoningOutputTokens > 0) parts.push(`${formatTokenCount(usage.reasoningOutputTokens)} reasoning`);
+  return parts.join(' · ');
+}
+
+function appendTokenMetric(metric, usage) {
+  return usage ? `${metric} · ${formatTokenCount(usage.totalTokens)} tok` : metric;
+}
+
 function createTerminalPainter({ enabled, colorDepth }) {
   const paint = (text, codes) => {
     if (!enabled) return text;
@@ -508,7 +593,7 @@ export function formatAutomaticCommitHelp() {
     '  --help                    Show this help',
     '',
     'Watch mode stays in the foreground, handles SIGINT/SIGTERM, and can be run by a normal process supervisor.',
-    `Progress is timestamped on stderr; interactive terminals get styled phase output and ${MODEL_HEARTBEAT_MS / 1_000}s model heartbeats.`,
+    `Progress is timestamped on stderr; interactive terminals get styled phase output, ${MODEL_HEARTBEAT_MS / 1_000}s model heartbeats, and exact token usage after each model call.`,
     'Set NO_COLOR=1 to disable color. Redirected output remains plain.',
     'This command stages and commits every settled change in the current repository.',
     'Non-trivial snapshots use up to four parallel Luna evidence calls before one Sol writing pass.',
@@ -542,7 +627,7 @@ function buildLunaPrompt(packet) {
     '- Every assigned manifest change ID appears in exactly one workstream. Never claim an overview-only change ID assigned to another shard.',
     '- Use manifestOverview to recognize cross-file relationships, but derive detailed claims only from this shard’s manifest, patches, and bounded context.',
     '- Describe observable changed behavior, not file mechanics alone.',
-    '- For each stream, provide 1-3 unique valueCandidates: user_journey for an evidenced human-facing before → immediate goal → next-step bridge, developer_journey for an evidenced maintainer/creator/reviewer workflow, and/or engineering_unlock for an evidenced system capability.',
+    '- For each stream, provide 1-3 valueCandidates: user_journey for an evidenced human-facing before → immediate goal → next-step bridge, developer_journey for an evidenced maintainer/creator/reviewer workflow, and/or engineering_unlock for an evidenced system capability. Use each kind at most once; combine same-kind ideas into one sentence.',
     '- Work specs are optional. Select them only from workSpecCandidates, and return none when that list is empty; never assume the repository uses docs/work or any work-spec convention. Include every requiredWorkSpecPath with its supplied relationship. Optional related candidates come from bounded exact-path references; include only those the evidence connects to a stream.',
     '- Classify proof as staged_change unless the staged packet itself contains a concrete recorded command/result receipt. A receipt includes both the command and its recorded outcome. A changed test file is not an executed check, and prior terminal output is not part of this frozen packet.',
     '- Treat metadataOnly manifest rows as real changes that still require workstream coverage, but infer only from path/status/mode/size and explicitly scope that their content was omitted.',
@@ -679,13 +764,13 @@ export function validateLunaReport(rawReport, packet) {
       if (!LUNA_VALUE_CANDIDATE_KINDS.includes(candidate?.kind)) {
         throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id}.valueCandidates[${candidateIndex}] has an invalid kind.`);
       }
-      if (valueCandidates.has(candidate.kind)) {
-        throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id} duplicated ${candidate.kind}.`);
-      }
-      valueCandidates.set(candidate.kind, normalizeSingleLine(candidate.text, {
+      const normalizedCandidate = normalizeSingleLine(candidate.text, {
         field: `${id}.valueCandidates[${candidateIndex}].text`,
         maximumLength: 800,
-      }));
+      });
+      // Advisory prose can be redundant without compromising snapshot accounting. A real sweep escaped here;
+      // keep the first valid category while IDs, proof, and work-spec relationships remain strictly validated.
+      if (!valueCandidates.has(candidate.kind)) valueCandidates.set(candidate.kind, normalizedCandidate);
     }
     const userJourneyCandidate = valueCandidates.get('user_journey') || null;
     const developerJourneyCandidate = valueCandidates.get('developer_journey') || null;
@@ -897,6 +982,7 @@ async function invokeCodex({
   signal,
 }) {
   const startedAt = Date.now();
+  let tokenUsage = null;
   const terminalPhase = requestedTerminalPhase || (model === LUNA_MODEL ? 'LUNA' : model === SOL_MODEL ? 'SOL' : 'MODEL');
   const completionLabel = terminalPhase.startsWith('LUNA') ? 'Evidence shard ready' : 'Commit message ready';
   const heartbeat = setInterval(() => {
@@ -928,6 +1014,7 @@ async function invokeCodex({
       '--disable', 'hooks',
       '--disable', 'plugins',
       'exec',
+      '--json',
       '--ephemeral',
       '--ignore-user-config',
       '--color', 'never',
@@ -945,6 +1032,8 @@ async function invokeCodex({
       maximumStdoutBytes: 2 * 1024 * 1024,
       signal,
     });
+    const codexEvents = parseCodexJsonLines(result.stdout);
+    tokenUsage = codexEvents.tokenUsage;
     if (result.code !== 0) {
       const stderrLines = result.stderr.toString('utf8').trim().split(/\r?\n/u).filter(Boolean);
       // Codex schema/API failures are multi-line diagnostics whose final line is often only `}`.
@@ -961,24 +1050,28 @@ async function invokeCodex({
       output = await fs.readFile(outputPath, 'utf8');
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
-      output = result.stdout.toString('utf8');
+      if (!codexEvents.finalMessage) {
+        throw new AutomaticCommitError('CODEX_OUTPUT_MISSING', `${model} produced no final message.`, { retryable: true });
+      }
+      output = codexEvents.finalMessage;
     }
-    const parsedOutput = parseModelJson(output, model);
     const elapsed = formatElapsedTime(Date.now() - startedAt);
-    log(`${phaseLabel} completed in ${elapsed}.`, {
+    const tokenDetail = formatTokenUsageDetail(tokenUsage);
+    log(`${phaseLabel} completed in ${elapsed}${tokenDetail ? ` (${tokenDetail})` : ''}.`, {
       phase: terminalPhase,
       state: 'success',
       prettyMessage: completionLabel,
-      metric: elapsed,
+      metric: appendTokenMetric(elapsed, tokenUsage),
     });
-    return parsedOutput;
+    return { output, tokenUsage };
   } catch (error) {
     const elapsed = formatElapsedTime(Date.now() - startedAt);
-    log(`${phaseLabel} stopped after ${elapsed}.`, {
+    const tokenDetail = formatTokenUsageDetail(tokenUsage);
+    log(`${phaseLabel} stopped after ${elapsed}${tokenDetail ? ` (${tokenDetail})` : ''}.`, {
       phase: terminalPhase,
       state: 'error',
       prettyMessage: 'Model call stopped',
-      metric: elapsed,
+      metric: appendTokenMetric(elapsed, tokenUsage),
     });
     throw error;
   } finally {
@@ -1009,7 +1102,7 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
   if (signal?.aborted) relayCallerAbort();
   else signal?.addEventListener('abort', relayCallerAbort, { once: true });
   let firstShardError = null;
-  let shardReports;
+  let completedShardResults;
   try {
     const settledShardReports = await Promise.allSettled(lunaPackets.map(async (lunaPacket, shardIndex) => {
       const shardNumber = shardIndex + 1;
@@ -1023,7 +1116,7 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
         });
       }
       try {
-        const rawLunaReport = await invokeCodex({
+        const lunaInvocation = await invokeCodex({
           codexBin,
           repoRoot,
           model: LUNA_MODEL,
@@ -1040,7 +1133,10 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
           log,
           signal: shardAbortController.signal,
         });
-        return validateLunaReport(rawLunaReport, lunaPacket);
+        return {
+          report: validateLunaReport(parseModelJson(lunaInvocation.output, LUNA_MODEL), lunaPacket),
+          tokenUsage: lunaInvocation.tokenUsage,
+        };
       } catch (error) {
         if (!firstShardError) {
           firstShardError = error;
@@ -1050,17 +1146,20 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
       }
     }));
     if (firstShardError) throw firstShardError;
-    shardReports = settledShardReports.map((result) => result.value);
+    completedShardResults = settledShardReports.map((result) => result.value);
   } finally {
     signal?.removeEventListener('abort', relayCallerAbort);
   }
+
+  const shardReports = completedShardResults.map((result) => result.report);
+  const lunaTokenUsage = combineCodexTokenUsage(completedShardResults.map((result) => result.tokenUsage));
   const lunaReport = validateLunaReport(mergeLunaShardReports({ packet, shardReports }), packet);
   if (shardCount > 1) {
-    log(`Merged ${shardCount} Luna shards into ${lunaReport.workstreams.length} validated workstreams.`, {
+    log(`Merged ${shardCount} Luna shards into ${lunaReport.workstreams.length} validated workstreams${lunaTokenUsage ? ` (${formatTokenUsageDetail(lunaTokenUsage)})` : ''}.`, {
       phase: 'LUNA',
       state: 'success',
       prettyMessage: 'Full-snapshot evidence merged',
-      metric: `${lunaReport.workstreams.length} workstreams`,
+      metric: appendTokenMetric(`${lunaReport.workstreams.length} workstreams`, lunaTokenUsage),
     });
   }
 
@@ -1071,10 +1170,11 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
     prettyMessage: `Shaping ${workstreamLabel}`,
     metric: SOL_REASONING_EFFORT,
   });
+  const solTokenUsages = [];
   let previousValidationError = '';
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      const rawSolMessage = await invokeCodex({
+      const solInvocation = await invokeCodex({
         codexBin,
         repoRoot,
         model: SOL_MODEL,
@@ -1088,7 +1188,11 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
         log,
         signal,
       });
-      return validateSolMessage(rawSolMessage, lunaReport);
+      solTokenUsages.push(solInvocation.tokenUsage);
+      return {
+        message: validateSolMessage(parseModelJson(solInvocation.output, SOL_MODEL), lunaReport),
+        tokenUsage: combineCodexTokenUsage([lunaTokenUsage, ...solTokenUsages]),
+      };
     } catch (error) {
       const repairable = error instanceof AutomaticCommitError
         && (error.code === 'INVALID_MODEL_JSON' || error.code === 'INVALID_MODEL_OUTPUT');
@@ -1170,7 +1274,7 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
       metric: packetElapsed,
       detail: packetBytes.prettyDetail,
     });
-    const message = await generateCommitMessage({
+    const generatedMessage = await generateCommitMessage({
       codexBin: resolvedCodexBin,
       repoRoot: resolvedRepoRoot,
       packet,
@@ -1179,6 +1283,7 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
       log,
       signal,
     });
+    const { message, tokenUsage } = generatedMessage;
     const commitMessage = renderCommitMessage(message, { repositoryName });
     const commitStartedAt = Date.now();
     const commitOid = await commitFrozenSnapshot({
@@ -1193,11 +1298,12 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
     });
     const commitElapsed = formatElapsedTime(Date.now() - commitStartedAt);
     const totalElapsed = formatElapsedTime(Date.now() - runStartedAt);
-    log(`Frozen snapshot committed in ${commitElapsed}; total run ${totalElapsed}.`, {
+    const tokenDetail = formatTokenUsageDetail(tokenUsage);
+    log(`Frozen snapshot committed in ${commitElapsed}; total run ${totalElapsed}${tokenDetail ? `; ${tokenDetail}` : ''}.`, {
       phase: 'DONE',
       state: 'success',
       prettyMessage: `Committed ${commitOid.slice(0, 12)}`,
-      metric: totalElapsed,
+      metric: appendTokenMetric(totalElapsed, tokenUsage),
       detail: message.subject,
       footer: true,
     });
@@ -1211,6 +1317,7 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
       snapshotId: snapshot.snapshotId,
       workstreamCount: message.workstreamIds.length,
       commitMessage,
+      tokenUsage,
     };
   } finally {
     await Promise.all([

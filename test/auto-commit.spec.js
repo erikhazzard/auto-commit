@@ -44,6 +44,7 @@ const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_LOG',
   'FAKE_CODEX_EXIT_EARLY',
   'FAKE_CODEX_EXPECTED_LUNA_SHARDS',
+  'FAKE_CODEX_DUPLICATE_VALUE_KIND',
   'FAKE_CODEX_FAIL_LUNA_SHARD',
   'FAKE_CODEX_HANG_LUNA_SHARDS',
   'FAKE_CODEX_INVALID_SOL_FIRST',
@@ -131,6 +132,7 @@ if (logPath) {
     cwd: process.cwd(),
     inheritedPwd: process.env.PWD,
     hasGitIndexFile: Boolean(process.env.GIT_INDEX_FILE),
+    jsonOutput: args.includes('--json'),
     outputSchemaContract: {
       snapshotIdEnum: outputSchema.properties?.snapshotId?.enum || null,
       lunaValueCandidateMinimum: outputSchema.properties?.workstreams?.items?.properties?.valueCandidates?.minItems || 0,
@@ -235,6 +237,15 @@ if (model === 'gpt-5.6-luna') {
         })),
     })),
   };
+  if (process.env.FAKE_CODEX_DUPLICATE_VALUE_KIND && output.workstreams[0]) {
+    output.workstreams[0].valueCandidates = [{
+      kind: 'developer_journey',
+      text: 'A maintainer can use the primary workflow described by the staged evidence.',
+    }, {
+      kind: 'developer_journey',
+      text: 'A maintainer can also use a redundant restatement of that workflow.',
+    }];
+  }
 } else if (model === 'gpt-5.6-sol') {
   const report = parseEnvelope('validated_luna_report');
   const firstSolCall = !priorCalls.some((call) => call.model === 'gpt-5.6-sol');
@@ -266,7 +277,16 @@ const malformedFirstSol = model === 'gpt-5.6-sol'
   && !priorCalls.some((call) => call.model === 'gpt-5.6-sol');
 const serialized = malformedFirstSol ? '{"subject":' : JSON.stringify(output);
 fs.writeFileSync(outputPath, serialized);
-process.stdout.write(serialized);
+if (args.includes('--json')) {
+  const usage = model === 'gpt-5.6-luna'
+    ? { input_tokens: 1200, cached_input_tokens: 400, output_tokens: 300, reasoning_output_tokens: 200 }
+    : { input_tokens: 800, cached_input_tokens: 200, output_tokens: 200, reasoning_output_tokens: 100 };
+  process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'fake-thread' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'turn.started' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage }) + '\\n');
+} else {
+  process.stdout.write(serialized);
+}
 `, { mode: 0o700 });
   process.env.FAKE_CODEX_TARGET_REPO = repoRoot;
   return fakePath;
@@ -621,6 +641,21 @@ describe.sequential('automatic commit core flow', () => {
     expect(calls[0].args).toContain('shell_environment_policy.inherit="core"');
     expect(calls[0].cwd).toBe(resolvedRepoRoot);
     expect(calls[0].inheritedPwd).toBe(resolvedRepoRoot);
+  });
+
+  it('commits when Luna redundantly repeats one journey candidate kind', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    process.env.FAKE_CODEX_DUPLICATE_VALUE_KIND = '1';
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const opened = true;\n');
+
+    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+
+    expect(result.status).toBe('committed');
+    expect(result.commitMessage).toContain(
+      'Developer journey: A maintainer can use the primary workflow described by the staged evidence.',
+    );
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('2\n');
   });
 
   it('includes a work spec that owns a changed descendant as related', async () => {
@@ -980,6 +1015,7 @@ describe.sequential('automatic commit core flow', () => {
     const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
     expect(lunaCalls).toHaveLength(4);
     expect(calls.filter((call) => call.model === 'gpt-5.6-sol')).toHaveLength(1);
+    expect(calls.every((call) => call.jsonOutput)).toBe(true);
     const shardPackets = lunaCalls.map((call) => parsePromptEnvelope(call.prompt, 'snapshot_packet'));
     const assignedChangeIds = shardPackets.flatMap((packet) => packet.manifest.map((change) => change.id));
     expect(assignedChangeIds).toHaveLength(40);
@@ -1012,7 +1048,26 @@ describe.sequential('automatic commit core flow', () => {
       phase: 'LUNA',
       state: 'success',
       prettyMessage: 'Full-snapshot evidence merged',
+      metric: '4 workstreams · 6.0k tok',
     }));
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'SOL',
+      state: 'success',
+      prettyMessage: 'Commit message ready',
+      metric: expect.stringMatching(/1\.0k tok/u),
+    }));
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'DONE',
+      state: 'success',
+      metric: expect.stringMatching(/7\.0k tok/u),
+    }));
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 5_600,
+      cachedInputTokens: 1_800,
+      outputTokens: 1_400,
+      reasoningOutputTokens: 900,
+      totalTokens: 7_000,
+    });
   });
 
   it('cancels sibling Luna processes and never calls Sol when one shard fails', async () => {
