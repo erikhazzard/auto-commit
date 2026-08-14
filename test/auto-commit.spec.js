@@ -308,7 +308,7 @@ describe.sequential('automatic commit core flow', () => {
     expect(() => deriveRepositoryName('/tmp/repository with spaces')).toThrow(/Repository directory/);
   });
 
-  it('packs an installable zero-runtime-dependency auto-commit binary', async () => {
+  it('packs installable auto-commit and gcm binaries without runtime dependencies', async () => {
     const packageRoot = path.resolve('.');
     const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-commit-package-test-'));
     temporaryDirectories.add(temporaryRoot);
@@ -350,12 +350,23 @@ describe.sequential('automatic commit core flow', () => {
       timeout: 10_000,
       maxBuffer: 8 * 1024 * 1024,
     });
+    const gcmHelp = await execFileAsync(path.join(consumerRoot, 'node_modules', '.bin', 'gcm'), ['--help'], {
+      cwd: consumerRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
     const installedManifest = JSON.parse(await fs.readFile(
       path.join(consumerRoot, 'node_modules', '@erikhazzard', 'auto-commit', 'package.json'),
       'utf8',
     ));
     expect(help.stdout).toContain('auto-commit --watch');
     expect(help.stdout).toContain('stages and commits every settled change');
+    expect(gcmHelp.stdout).toBe(help.stdout);
+    expect(installedManifest.bin).toEqual({
+      'auto-commit': 'bin/auto-commit.js',
+      gcm: 'bin/auto-commit.js',
+    });
     expect(installedManifest.dependencies).toBeUndefined();
   });
 

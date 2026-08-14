@@ -13,7 +13,24 @@
 
 The CLI has no third-party runtime dependencies.
 
-## Install from Git
+## Install globally as `gcm`
+
+Install the current Git revision once to make `gcm` available in any repository and shell:
+
+```bash
+npm install --global --allow-git=root 'git+ssh://git@github.com/erikhazzard/auto-commit.git'
+gcm --help
+```
+
+Then run a sweep from any Git repository:
+
+```bash
+gcm
+```
+
+`gcm` is a real package command, not a shell alias, so `.zshrc` changes are unnecessary. It is equivalent to `auto-commit --once`: both commands stage, freeze, and commit the complete settled delta. Rerun the install command to upgrade. To pin a specific revision, append `#FULL_COMMIT_SHA` to the Git URL.
+
+## Install in a repository
 
 Install the repository as a development dependency over SSH. Consumer repositories should append `#` plus a full upstream commit SHA to the Git URL so installs remain immutable:
 
@@ -37,15 +54,6 @@ Confirm the installed command before its first write:
 ```bash
 npx auto-commit --help
 ```
-
-For a machine-wide command, install the same full SHA globally. npm 12 users whose Git dependency policy defaults to `none` can permit only the root package request for this invocation:
-
-```bash
-npm install --global --allow-git=root 'git+ssh://git@github.com/erikhazzard/auto-commit.git#FULL_COMMIT_SHA'
-alias gcm='auto-commit --once'
-```
-
-The alias intentionally does not run a separate `git add`: `auto-commit --once` owns staging and freezing the complete delta.
 
 ## Use
 
