@@ -1,6 +1,6 @@
 # auto-commit
 
-`auto-commit` turns the complete settled delta in a Git repository into one evidence-bound commit. Luna accounts for every staged change, Sol writes the concise message, and deterministic checks ensure the committed tree is the frozen snapshot both models received.
+`auto-commit` turns the complete settled delta in a Git repository into one evidence-bound commit. Bounded parallel Luna calls account for every staged change, Sol writes the concise message, and deterministic checks ensure the committed tree is the frozen snapshot the models received.
 
 > [!WARNING]
 > This is intentionally a sweep command. It runs `git add -A` and commits **all** settled changes in the current repository. It does not select files, split workstreams into separate commits, push, or rewrite history.
@@ -55,6 +55,8 @@ npm run commit:auto:watch
 Watch mode runs in the foreground, waits for a quiet change window, responds to `SIGINT` and `SIGTERM`, and can be supervised by the caller. Use `NO_COLOR=1` when ANSI color is undesirable.
 
 Interactive progress is written to stderr as a timestamped phase rail. Redirected stderr degrades to timestamped plain text. A successful one-shot invocation writes the final commit identity to stdout.
+
+Non-trivial snapshots are split into as many as four size-balanced Luna shards. Each shard receives a disjoint set of detailed changes, all shards run concurrently, and the runtime revalidates exact full-snapshot coverage before invoking Sol. Small snapshots naturally use one Luna call. Any shard failure cancels its siblings and leaves the staged work uncommitted.
 
 ## What the message contains
 

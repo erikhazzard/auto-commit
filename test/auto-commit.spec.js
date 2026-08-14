@@ -43,6 +43,9 @@ const temporaryDirectories = new Set();
 const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_LOG',
   'FAKE_CODEX_EXIT_EARLY',
+  'FAKE_CODEX_EXPECTED_LUNA_SHARDS',
+  'FAKE_CODEX_FAIL_LUNA_SHARD',
+  'FAKE_CODEX_HANG_LUNA_SHARDS',
   'FAKE_CODEX_INVALID_SOL_FIRST',
   'FAKE_CODEX_MALFORMED_SOL_FIRST',
   'FAKE_CODEX_MUTATE_CONTENT',
@@ -106,10 +109,20 @@ for await (const chunk of process.stdin) input.push(chunk);
 const prompt = Buffer.concat(input).toString('utf8');
 const outputPath = args[args.indexOf('--output-last-message') + 1];
 const logPath = process.env.FAKE_CODEX_LOG;
+function parseLoggedCalls(content) {
+  return content.trim().split('\\n').filter(Boolean).flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+}
 const existingLog = logPath && fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
-const priorCalls = existingLog.trim() ? existingLog.trim().split('\\n').map(JSON.parse) : [];
+const priorCalls = existingLog.trim() ? parseLoggedCalls(existingLog) : [];
 if (logPath) {
   fs.appendFileSync(logPath, JSON.stringify({
+    pid: process.pid,
     model,
     args,
     prompt,
@@ -131,6 +144,32 @@ function parseEnvelope(tag) {
 let output;
 if (model === 'gpt-5.6-luna') {
   const packet = parseEnvelope('snapshot_packet');
+  const expectedLunaShards = Number.parseInt(process.env.FAKE_CODEX_EXPECTED_LUNA_SHARDS || '0', 10);
+  if (expectedLunaShards > 1) {
+    const barrierDeadline = Date.now() + 5_000;
+    const waitArray = new Int32Array(new SharedArrayBuffer(4));
+    while (Date.now() < barrierDeadline) {
+      const calls = logPath && fs.existsSync(logPath)
+        ? parseLoggedCalls(fs.readFileSync(logPath, 'utf8'))
+        : [];
+      if (calls.filter((call) => call.model === 'gpt-5.6-luna').length >= expectedLunaShards) break;
+      Atomics.wait(waitArray, 0, 0, 10);
+    }
+    const calls = logPath && fs.existsSync(logPath)
+      ? parseLoggedCalls(fs.readFileSync(logPath, 'utf8'))
+      : [];
+    if (calls.filter((call) => call.model === 'gpt-5.6-luna').length < expectedLunaShards) {
+      throw new Error('Timed out waiting for concurrent Luna shards.');
+    }
+  }
+  if (process.env.FAKE_CODEX_FAIL_LUNA_SHARD === String(packet.shard?.index)) {
+    process.stderr.write('forced Luna shard failure\\n');
+    process.exit(65);
+  }
+  if (process.env.FAKE_CODEX_HANG_LUNA_SHARDS) {
+    setInterval(() => {}, 1_000);
+    await new Promise(() => {});
+  }
   if (process.env.FAKE_CODEX_MUTATE_PATH) {
     fs.writeFileSync(
       path.resolve(process.env.FAKE_CODEX_TARGET_REPO, process.env.FAKE_CODEX_MUTATE_PATH),
@@ -226,6 +265,15 @@ process.stdout.write(serialized);
 async function readFakeCalls(logPath) {
   const content = await fs.readFile(logPath, 'utf8');
   return content.trim().split('\n').map(JSON.parse);
+}
+
+function parsePromptEnvelope(prompt, tag) {
+  const opening = `<${tag}>\n`;
+  const closing = `\n</${tag}>`;
+  const start = prompt.indexOf(opening);
+  const end = prompt.indexOf(closing, start + opening.length);
+  if (start < 0 || end < 0) throw new Error(`Missing ${tag}`);
+  return JSON.parse(prompt.slice(start + opening.length, end));
 }
 
 async function waitForCommitCount(repoRoot, expectedCount, timeoutMs = 10_000) {
@@ -884,6 +932,7 @@ describe.sequential('automatic commit core flow', () => {
     const codexBin = await createFakeCodex(repoRoot);
     const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
     process.env.FAKE_CODEX_LOG = logPath;
+    process.env.FAKE_CODEX_EXPECTED_LUNA_SHARDS = '4';
     for (let index = 0; index < 40; index += 1) {
       await writeRepoFile(
         repoRoot,
@@ -892,13 +941,65 @@ describe.sequential('automatic commit core flow', () => {
       );
     }
 
-    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+    const progressEvents = [];
+    const result = await runAutomaticCommitOnce({
+      repoRoot,
+      codexBin,
+      log: (_message, event) => progressEvents.push(event),
+    });
 
     expect(result.status).toBe('committed');
-    const [lunaCall] = await readFakeCalls(logPath);
-    expect(lunaCall.prompt.length).toBeLessThan(1_048_576);
-    expect(lunaCall.prompt).toContain('[patch body omitted between bounded excerpts:');
-    expect(lunaCall.prompt).toContain('"path":"src/generated-39.js"');
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    expect(lunaCalls).toHaveLength(4);
+    expect(calls.filter((call) => call.model === 'gpt-5.6-sol')).toHaveLength(1);
+    const shardPackets = lunaCalls.map((call) => parsePromptEnvelope(call.prompt, 'snapshot_packet'));
+    const assignedChangeIds = shardPackets.flatMap((packet) => packet.manifest.map((change) => change.id));
+    expect(assignedChangeIds).toHaveLength(40);
+    expect(new Set(assignedChangeIds).size).toBe(40);
+    for (const shardPacket of shardPackets) {
+      const shardChangeIds = new Set(shardPacket.manifest.map((change) => change.id));
+      expect(shardPacket.manifestOverview).toHaveLength(40);
+      expect(shardPacket.patches.every((patch) => shardChangeIds.has(patch.changeId))).toBe(true);
+    }
+    expect(lunaCalls.every((call) => call.prompt.length < 1_048_576)).toBe(true);
+    expect(lunaCalls.some((call) => call.prompt.includes('[patch body omitted between bounded excerpts:'))).toBe(true);
+    expect(lunaCalls.some((call) => call.prompt.includes('"path":"src/generated-39.js"'))).toBe(true);
+    expect(progressEvents
+      .filter((event) => event.state === 'active' && /^LUNA \d\/4$/u.test(event.phase))
+      .map((event) => event.phase))
+      .toEqual(['LUNA 1/4', 'LUNA 2/4', 'LUNA 3/4', 'LUNA 4/4']);
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'LUNA',
+      state: 'success',
+      prettyMessage: 'Full-snapshot evidence merged',
+    }));
+  });
+
+  it('cancels sibling Luna processes and never calls Sol when one shard fails', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    process.env.FAKE_CODEX_LOG = logPath;
+    process.env.FAKE_CODEX_EXPECTED_LUNA_SHARDS = '3';
+    process.env.FAKE_CODEX_FAIL_LUNA_SHARD = '1';
+    process.env.FAKE_CODEX_HANG_LUNA_SHARDS = '1';
+    for (let index = 0; index < 24; index += 1) {
+      await writeRepoFile(repoRoot, `src/shard-failure-${index}.js`, `export const shardFailure${index} = true;\n`);
+    }
+
+    await expect(runAutomaticCommitOnce({ repoRoot, codexBin })).rejects.toMatchObject({
+      code: 'CODEX_FAILED',
+    });
+
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    expect(lunaCalls).toHaveLength(3);
+    expect(calls.some((call) => call.model === 'gpt-5.6-sol')).toBe(false);
+    for (const call of lunaCalls) {
+      expect(() => process.kill(call.pid, 0)).toThrow();
+    }
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
   });
 
   it('accounts for oversized text as metadata without sending its body to a model', async () => {

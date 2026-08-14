@@ -256,9 +256,9 @@ function createBoundedPatchExcerpt(patch, maximumBytes, label) {
   return `${head}${marker}${tail}`;
 }
 
-async function readBoundedPatch({ repoRoot, baseOid, manifest, env, signal }) {
+async function readBoundedPatches({ repoRoot, baseOid, manifest, env, signal }) {
   const textualChanges = manifest.filter((change) => !change.metadataOnly);
-  if (textualChanges.length === 0) return '';
+  if (textualChanges.length === 0) return [];
   const perChangeBudget = Math.max(512, Math.floor(MAX_PATCH_CONTEXT_BYTES / textualChanges.length));
   const excerpts = [];
   for (const change of textualChanges) {
@@ -280,9 +280,13 @@ async function readBoundedPatch({ repoRoot, baseOid, manifest, env, signal }) {
         `A high-confidence ${secretViolation} signature was found in the staged diff for ${change.path}; no model was called.`,
       );
     }
-    excerpts.push(createBoundedPatchExcerpt(fullPatch, perChangeBudget, change.path));
+    excerpts.push({
+      changeId: change.id,
+      path: change.path,
+      content: createBoundedPatchExcerpt(fullPatch, perChangeBudget, change.path),
+    });
   }
-  return excerpts.join('\n');
+  return excerpts;
 }
 
 async function scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, env, signal }) {
@@ -321,6 +325,31 @@ function findApplicableAgentPaths(changedPaths, stageMap) {
     }
   }
   return [...result].sort((left, right) => left.split('/').length - right.split('/').length || left.localeCompare(right));
+}
+
+function pathsForChange(change) {
+  return [change.oldPath, change.path].filter(Boolean);
+}
+
+function findAgentRelatedChangeIds(agentPath, manifest) {
+  if (agentPath === 'AGENTS.md') return manifest.map((change) => change.id);
+  const agentDirectory = path.posix.dirname(agentPath);
+  return manifest
+    .filter((change) => pathsForChange(change).some((changedPath) => (
+      changedPath === agentPath || changedPath.startsWith(`${agentDirectory}/`)
+    )))
+    .map((change) => change.id);
+}
+
+function findWorkSpecRelatedChangeIds(candidate, manifest) {
+  const workSpecDirectory = path.posix.dirname(candidate.path);
+  return manifest
+    .filter((change) => pathsForChange(change).some((changedPath) => (
+      changedPath === candidate.path
+      || changedPath.startsWith(`${workSpecDirectory}/`)
+      || candidate.content.includes(changedPath)
+    )))
+    .map((change) => change.id);
 }
 
 function addWorkSpecCandidate(candidateMap, candidate) {
@@ -480,7 +509,7 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
   });
   await scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, env: snapshot.snapshotEnv, signal });
 
-  const patch = await readBoundedPatch({
+  const patches = await readBoundedPatches({
     repoRoot,
     baseOid,
     manifest,
@@ -521,6 +550,7 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     agentContextBytes += Buffer.byteLength(context.content);
     agentContracts.push({
       path: agentPath,
+      relatedChangeIds: findAgentRelatedChangeIds(agentPath, manifest),
       blobSize: agentBlobSizes.get(row.oid) || 0,
       ...context,
     });
@@ -547,6 +577,10 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     signal,
   })).stdout.toString('utf8');
 
+  const workSpecCandidates = workSpecDiscovery.candidates.map((candidate) => ({
+    ...candidate,
+    relatedChangeIds: findWorkSpecRelatedChangeIds(candidate, manifest),
+  }));
   const packet = {
     snapshotId: snapshot.snapshotId,
     baseOid,
@@ -554,10 +588,10 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     repositoryName,
     manifest,
     diffStat: stat,
-    patch,
+    patches,
     applicableAgentContracts: agentContracts,
-    workSpecCandidates: workSpecDiscovery.candidates,
-    requiredWorkSpecPaths: workSpecDiscovery.candidates
+    workSpecCandidates,
+    requiredWorkSpecPaths: workSpecCandidates
       .filter((candidate) => candidate.required)
       .map((candidate) => candidate.path),
     workSpecDiscovery: { omittedSuggestionCount: workSpecDiscovery.omittedSuggestionCount },
