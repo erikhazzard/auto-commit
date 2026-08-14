@@ -48,11 +48,13 @@ const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_FAIL_LUNA_SHARD',
   'FAKE_CODEX_HANG_LUNA_SHARDS',
   'FAKE_CODEX_INVALID_SOL_FIRST',
+  'FAKE_CODEX_LUNA_USAGE',
   'FAKE_CODEX_MALFORMED_SOL_FIRST',
   'FAKE_CODEX_MUTATE_CONTENT',
   'FAKE_CODEX_MUTATE_PATH',
   'FAKE_CODEX_STAGE_PATH',
   'FAKE_CODEX_SOL_SUBJECT',
+  'FAKE_CODEX_SOL_USAGE',
   'FAKE_CODEX_TARGET_REPO',
 ];
 
@@ -274,9 +276,13 @@ const malformedFirstSol = model === 'gpt-5.6-sol'
 const serialized = malformedFirstSol ? '{"subject":' : JSON.stringify(output);
 fs.writeFileSync(outputPath, serialized);
 if (args.includes('--json')) {
-  const usage = model === 'gpt-5.6-luna'
+  const defaultUsage = model === 'gpt-5.6-luna'
     ? { input_tokens: 1200, cached_input_tokens: 400, output_tokens: 300, reasoning_output_tokens: 200 }
     : { input_tokens: 800, cached_input_tokens: 200, output_tokens: 200, reasoning_output_tokens: 100 };
+  const usageOverride = model === 'gpt-5.6-luna'
+    ? process.env.FAKE_CODEX_LUNA_USAGE
+    : process.env.FAKE_CODEX_SOL_USAGE;
+  const usage = usageOverride ? JSON.parse(usageOverride) : defaultUsage;
   process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'fake-thread' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'turn.started' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'turn.completed', usage }) + '\\n');
@@ -843,6 +849,7 @@ describe.sequential('automatic commit core flow', () => {
     );
     expect(result.stderr).toMatch(/Luna xhigh completed in/u);
     expect(result.stderr).toMatch(/Sol high completed in/u);
+    expect(result.stderr).toMatch(/Estimated API-equivalent model cost: approximately \$0\.0096/u);
     expect(result.stderr).toMatch(/total run /u);
     expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('2\n');
   });
@@ -1057,12 +1064,28 @@ describe.sequential('automatic commit core flow', () => {
       state: 'success',
       metric: expect.stringMatching(/7\.0k tok/u),
     }));
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'COST',
+      state: 'info',
+      prettyMessage: 'API-equivalent estimate',
+      metric: '≈ $0.011',
+      detail: 'Luna $0.0021 · Sol $0.0091 · standard API rates 2026-08-14',
+    }));
     expect(result.tokenUsage).toEqual({
       inputTokens: 5_600,
       cachedInputTokens: 1_800,
       outputTokens: 1_400,
       reasoningOutputTokens: 900,
       totalTokens: 7_000,
+    });
+    expect(result.apiCostEstimate).toEqual({
+      currency: 'USD',
+      pricingAsOf: '2026-08-14',
+      estimatedUsd: 0.011212,
+      byModelUsd: {
+        'gpt-5.6-luna': 0.002112,
+        'gpt-5.6-sol': 0.0091,
+      },
     });
   });
 
@@ -1207,6 +1230,33 @@ describe.sequential('automatic commit core flow', () => {
     expect(lunaCall.prompt).toContain('"metadataOnly":true');
     expect(lunaCall.prompt).not.toContain(marker);
     expect((await git(repoRoot, ['cat-file', '-s', 'HEAD:generated/reference.txt'])).trim()).toBe('600034');
+  });
+
+  it('applies published long-context pricing per model invocation', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    process.env.FAKE_CODEX_LUNA_USAGE = JSON.stringify({
+      input_tokens: 300_000,
+      cached_input_tokens: 100_000,
+      output_tokens: 10_000,
+      reasoning_output_tokens: 8_000,
+    });
+    process.env.FAKE_CODEX_SOL_USAGE = JSON.stringify({
+      input_tokens: 1_000,
+      cached_input_tokens: 0,
+      output_tokens: 100,
+      reasoning_output_tokens: 50,
+    });
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const pricedPerInvocation = true;\n');
+
+    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+
+    expect(result.status).toBe('committed');
+    expect(result.apiCostEstimate.estimatedUsd).toBeCloseTo(0.11, 12);
+    expect(result.apiCostEstimate.byModelUsd).toEqual({
+      'gpt-5.6-luna': 0.102,
+      'gpt-5.6-sol': 0.008,
+    });
   });
 
   it('commits the frozen LFS pointer while keeping large media metadata-only', async () => {
@@ -1354,6 +1404,13 @@ exit 0
     const calls = await readFakeCalls(logPath);
     expect(calls.map((call) => call.model)).toEqual(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-sol']);
     expect(calls[2].prompt).toContain('upgraded staged changes into an executed proof claim');
+    expect(result.apiCostEstimate).toEqual(expect.objectContaining({
+      estimatedUsd: 0.018728,
+      byModelUsd: {
+        'gpt-5.6-luna': 0.000528,
+        'gpt-5.6-sol': 0.0182,
+      },
+    }));
     expect(await git(repoRoot, ['log', '-1', '--format=%B'])).toContain('no fresh test run was supplied');
   });
 

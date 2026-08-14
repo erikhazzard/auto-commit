@@ -61,6 +61,12 @@ const LUNA_MODEL = 'gpt-5.6-luna';
 const LUNA_REASONING_EFFORT = 'xhigh';
 const SOL_MODEL = 'gpt-5.6-sol';
 const SOL_REASONING_EFFORT = 'high';
+const API_PRICING_AS_OF = '2026-08-14';
+const LONG_CONTEXT_INPUT_THRESHOLD_TOKENS = 272_000;
+const API_PRICING_USD_PER_MILLION_TOKENS = Object.freeze({
+  [LUNA_MODEL]: Object.freeze({ input: 0.20, cachedInput: 0.02, output: 1.20 }),
+  [SOL_MODEL]: Object.freeze({ input: 5.00, cachedInput: 0.50, output: 30.00 }),
+});
 const MESSAGE_VALUE_MAX_CHARACTERS = 320;
 const MESSAGE_WORKSTREAMS_MAX_CHARACTERS = 240;
 const MESSAGE_PROOF_MAX_CHARACTERS = 320;
@@ -367,6 +373,49 @@ function appendTokenMetric(metric, usage) {
   return usage ? `${metric} · ${formatTokenCount(usage.totalTokens)} tok` : metric;
 }
 
+function estimateApiEquivalentCost(modelInvocations) {
+  if (modelInvocations.length === 0 || modelInvocations.some((invocation) => !invocation.usage)) return null;
+  const byModelUsd = Object.fromEntries(Object.keys(API_PRICING_USD_PER_MILLION_TOKENS).map((model) => [model, 0]));
+  let estimatedUsd = 0;
+  for (const { model, usage } of modelInvocations) {
+    const pricing = API_PRICING_USD_PER_MILLION_TOKENS[model];
+    if (!pricing || usage.cachedInputTokens > usage.inputTokens) return null;
+    const uncachedInputTokens = usage.inputTokens - usage.cachedInputTokens;
+    const longContext = usage.inputTokens > LONG_CONTEXT_INPUT_THRESHOLD_TOKENS;
+    const inputMultiplier = longContext ? 2 : 1;
+    const outputMultiplier = longContext ? 1.5 : 1;
+    // reasoningOutputTokens is a subset of outputTokens, so charging it again would double-count it.
+    const invocationUsd = (
+      inputMultiplier * (
+        uncachedInputTokens * pricing.input
+        + usage.cachedInputTokens * pricing.cachedInput
+      )
+      + outputMultiplier * usage.outputTokens * pricing.output
+    ) / 1_000_000;
+    byModelUsd[model] += invocationUsd;
+    estimatedUsd += invocationUsd;
+  }
+  return {
+    currency: 'USD',
+    pricingAsOf: API_PRICING_AS_OF,
+    estimatedUsd,
+    byModelUsd,
+  };
+}
+
+function formatEstimatedUsd(estimatedUsd) {
+  const decimalPlaces = estimatedUsd < 0.01 ? 4 : estimatedUsd < 1 ? 3 : 2;
+  return `$${estimatedUsd.toFixed(decimalPlaces)}`;
+}
+
+function formatApiCostBreakdown(estimate) {
+  return [
+    `Luna ${formatEstimatedUsd(estimate.byModelUsd[LUNA_MODEL])}`,
+    `Sol ${formatEstimatedUsd(estimate.byModelUsd[SOL_MODEL])}`,
+    `standard API rates ${estimate.pricingAsOf}`,
+  ].join(' · ');
+}
+
 function createTerminalPainter({ enabled, colorDepth }) {
   const paint = (text, codes) => {
     if (!enabled) return text;
@@ -608,6 +657,7 @@ export function formatAutomaticCommitHelp() {
     '',
     'Watch mode stays in the foreground, handles SIGINT/SIGTERM, and can be run by a normal process supervisor.',
     `Progress is timestamped on stderr; interactive terminals get styled phase output, ${MODEL_HEARTBEAT_MS / 1_000}s model heartbeats, and exact token usage after each model call.`,
+    `Completed model work includes an API-equivalent USD estimate using standard rates dated ${API_PRICING_AS_OF}; actual Codex billing may differ.`,
     'Set NO_COLOR=1 to disable color. Redirected output remains plain.',
     'This command stages and commits every settled change in the current repository.',
     'Non-trivial snapshots use up to four parallel Luna evidence calls before one Sol writing pass.',
@@ -1171,6 +1221,10 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
 
   const shardReports = completedShardResults.map((result) => result.report);
   const lunaTokenUsage = combineCodexTokenUsage(completedShardResults.map((result) => result.tokenUsage));
+  const lunaModelInvocations = completedShardResults.map((result) => ({
+    model: LUNA_MODEL,
+    usage: result.tokenUsage,
+  }));
   const lunaReport = validateLunaReport(mergeLunaShardReports({ packet, shardReports }), packet);
   if (shardCount > 1) {
     log(`Merged ${shardCount} Luna shards into ${lunaReport.workstreams.length} validated workstreams${lunaTokenUsage ? ` (${formatTokenUsageDetail(lunaTokenUsage)})` : ''}.`, {
@@ -1210,6 +1264,10 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
       return {
         message: validateSolMessage(parseModelJson(solInvocation.output, SOL_MODEL), lunaReport),
         tokenUsage: combineCodexTokenUsage([lunaTokenUsage, ...solTokenUsages]),
+        apiCostEstimate: estimateApiEquivalentCost([
+          ...lunaModelInvocations,
+          ...solTokenUsages.map((usage) => ({ model: SOL_MODEL, usage })),
+        ]),
       };
     } catch (error) {
       const repairable = error instanceof AutomaticCommitError
@@ -1301,8 +1359,19 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
       log,
       signal,
     });
-    const { message, tokenUsage } = generatedMessage;
+    const { message, tokenUsage, apiCostEstimate } = generatedMessage;
     const commitMessage = renderCommitMessage(message, { repositoryName });
+    if (apiCostEstimate) {
+      const formattedCost = formatEstimatedUsd(apiCostEstimate.estimatedUsd);
+      const costBreakdown = formatApiCostBreakdown(apiCostEstimate);
+      log(`Estimated API-equivalent model cost: approximately ${formattedCost} (${costBreakdown}).`, {
+        phase: 'COST',
+        state: 'info',
+        prettyMessage: 'API-equivalent estimate',
+        metric: `≈ ${formattedCost}`,
+        detail: costBreakdown,
+      });
+    }
     const commitStartedAt = Date.now();
     const commitOid = await commitFrozenSnapshot({
       repoRoot: resolvedRepoRoot,
@@ -1336,6 +1405,7 @@ export async function runAutomaticCommitOnce({ repoRoot, codexBin, log = () => {
       workstreamCount: message.workstreamIds.length,
       commitMessage,
       tokenUsage,
+      apiCostEstimate,
     };
   } finally {
     await Promise.all([
