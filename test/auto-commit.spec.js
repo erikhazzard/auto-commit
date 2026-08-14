@@ -1254,6 +1254,61 @@ describe.sequential('automatic commit core flow', () => {
     expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
   });
 
+  it('commits through inactive Husky v9 dispatch shims', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const hooksPath = path.join(repoRoot, '.husky', '_');
+    await fs.mkdir(hooksPath, { recursive: true });
+    await fs.writeFile(path.join(hooksPath, 'h'), `#!/usr/bin/env sh
+[ "$HUSKY" = "2" ] && set -x
+n=$(basename "$0")
+s=$(dirname "$(dirname "$0")")/$n
+
+[ ! -f "$s" ] && exit 0
+exit 0
+`);
+    for (const hookName of ['pre-commit', 'prepare-commit-msg', 'commit-msg']) {
+      await fs.writeFile(
+        path.join(hooksPath, hookName),
+        '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+        { mode: 0o700 },
+      );
+    }
+    await git(repoRoot, ['config', 'core.hooksPath', '.husky/_']);
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const huskyCompatible = true;\n');
+
+    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+
+    expect(result.status).toBe('committed');
+    expect(await git(repoRoot, ['show', 'HEAD:src/creator.js'])).toBe('export const huskyCompatible = true;\n');
+  });
+
+  it('still refuses an active hook behind a Husky v9 dispatch shim', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const hooksPath = path.join(repoRoot, '.husky', '_');
+    await fs.mkdir(hooksPath, { recursive: true });
+    await fs.writeFile(path.join(hooksPath, 'h'), `#!/usr/bin/env sh
+[ "$HUSKY" = "2" ] && set -x
+n=$(basename "$0")
+s=$(dirname "$(dirname "$0")")/$n
+
+[ ! -f "$s" ] && exit 0
+exit 0
+`);
+    await fs.writeFile(
+      path.join(hooksPath, 'pre-commit'),
+      '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+      { mode: 0o700 },
+    );
+    await writeRepoFile(repoRoot, '.husky/pre-commit', '#!/usr/bin/env sh\nexit 0\n');
+    await git(repoRoot, ['config', 'core.hooksPath', '.husky/_']);
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const activeHook = true;\n');
+
+    await expect(runAutomaticCommitOnce({ repoRoot, codexBin })).rejects.toMatchObject({ code: 'INDEX_OR_MESSAGE_HOOK' });
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
+  });
+
   it('commits frozen content and leaves a later worktree edit staged for the next sweep', async () => {
     const repoRoot = await createRepository();
     const codexBin = await createFakeCodex(repoRoot);

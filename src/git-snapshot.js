@@ -258,6 +258,39 @@ async function resolveDefaultHooksDirectory(repoRoot, signal) {
   return path.join(commonDirectory, 'hooks');
 }
 
+const HUSKY_DISPATCH_SHIM = `#!/usr/bin/env sh
+. "$(dirname "$0")/h"`;
+const HUSKY_INACTIVE_DISPATCH_PREFIX = `#!/usr/bin/env sh
+[ "$HUSKY" = "2" ] && set -x
+n=$(basename "$0")
+s=$(dirname "$(dirname "$0")")/$n
+
+[ ! -f "$s" ] && exit 0`;
+
+function normalizeShellSource(source) {
+  return source.replace(/\r\n?/gu, '\n').trimEnd();
+}
+
+async function isInactiveHuskyDispatchShim({ hooksPath, hookPath, hookName }) {
+  if (path.basename(hooksPath) !== '_') return false;
+  const effectiveHookPath = path.join(path.dirname(hooksPath), hookName);
+  if (await pathExists(effectiveHookPath)) return false;
+
+  try {
+    const [shimSource, dispatcherSource] = await Promise.all([
+      fs.readFile(hookPath, 'utf8'),
+      fs.readFile(path.join(hooksPath, 'h'), 'utf8'),
+    ]);
+    // Husky v9 installs executable shims for every Git hook, even when the project has no corresponding hook.
+    // Recognize only its exact no-op dispatch prefix so real or customized executable hooks remain guarded.
+    return normalizeShellSource(shimSource) === HUSKY_DISPATCH_SHIM
+      && normalizeShellSource(dispatcherSource).startsWith(HUSKY_INACTIVE_DISPATCH_PREFIX);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 export async function resolveGitCommonDirectory(repoRoot, signal) {
   const commonDirResult = await runGitCommand({ repoRoot, args: ['rev-parse', '--git-common-dir'], signal });
   const commonDirectory = await resolveGitPath(repoRoot, commonDirResult.stdout.toString('utf8').trim());
@@ -371,7 +404,11 @@ export async function assertSafeRepositoryState({ repoRoot, signal }) {
     const hookPath = path.join(hooksPath, hookName);
     try {
       const stats = await fs.stat(hookPath);
-      if (stats.isFile() && (stats.mode & 0o111) !== 0) {
+      if (
+        stats.isFile()
+        && (stats.mode & 0o111) !== 0
+        && !(await isInactiveHuskyDispatchShim({ hooksPath, hookPath, hookName }))
+      ) {
         throw new AutomaticCommitError(
           'INDEX_OR_MESSAGE_HOOK',
           `Refusing automatic commit because executable ${hookName} may change the analyzed index or message.`,
