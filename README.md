@@ -69,13 +69,17 @@ Non-trivial snapshots are split into as many as four size-balanced Luna shards. 
 
 ## What the message contains
 
-Every message has one subject plus at least one `User journey`, `Developer journey`, or `Engineering unlock`. Multiple distinct workstreams receive one concise aggregate line. `Proof` and `Scope` appear only when they add useful, evidence-supported information. Relevant specs render as repository-aware links:
+Every message has one subject plus at least one `User journey`, `Developer journey`, or `Engineering unlock`. Multiple distinct workstreams receive one concise aggregate line. `Proof` and `Scope` appear only when they add useful, evidence-supported information.
+
+Work specs are optional. When the frozen snapshot contains a discoverable, relevant file named `work-spec.md`, it renders with the Git repository directory name and its actual repository-relative path:
 
 ```text
-Work-Spec: repository-name/docs/work/example/work-spec.md
+Work-Spec: <repository>/<path-to-work-spec.md>
 ```
 
-Changed tests are not described as passing unless the staged evidence contains an explicit execution receipt.
+No `Work-Spec:` line is emitted when none is discovered. A repository does not need a `docs/work` directory or any work-spec convention. Built-in discovery finds `work-spec.md` files that own changed descendants, directly changed specs under `docs/work`, and bounded `docs/work` specs that name a changed path. Other filenames and unrelated layouts are ignored without blocking the commit.
+
+Proof language is deliberately conservative. A changed test file proves that test coverage changed, not that the test ran or passed. A message may describe a check as passing only when the frozen staged evidence contains a concrete receipt with both the command and its result. Test output that appeared earlier in the terminal is not visible to `auto-commit` unless it was recorded in a staged artifact.
 
 ## Safety and recovery
 
