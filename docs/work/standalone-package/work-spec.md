@@ -63,7 +63,9 @@
 ## 4) Current Truth
 
 - **Fact:** Commit `437c366a77d2c777478f520a0100996957b70a38` is pushed to the GitHub SSH remote; both confirmed consumers resolve it as a development dependency and removed the local fork.
+- **Fact:** Parallel release commit `60b75c7c7564f486b0f50a9021558d382c327625` is pushed to `origin/main`, installed globally as package 0.2.0, and pinned by both confirmed consumers.
 - **Fact:** Real installed-package runs committed the backend at `2038ae4f618f` and `idavoll-games` at `145daf6d5a33`, with correct repository prefixes and no push.
+- **Fact:** Fresh 0.2.0 consumer runs committed the backend at `e34d7fb64323` and `idavoll-games` at `bbe7476b7767`; edits arriving after the game snapshot remained staged for the scheduler's next pass.
 - **Fact:** Luna is the dominant latency: 15 backend changes took 2m19s in Luna plus 25s in Sol; 40 game changes took 3m44s in Luna plus 29s in Sol.
 - **Fact:** The package is Node ESM with no third-party runtime dependencies; the 0.2.0 candidate has a 36-case temporary-repository journey suite.
 - **Decision:** The package name is `@erikhazzard/auto-commit`, the binary name is `auto-commit`, and consumers pin the first upstream commit SHA through `git+ssh`.
@@ -91,8 +93,8 @@
 - **Regenerate / inspect:** `npm test`, `npm pack --dry-run`, and each consumer's `npm run commit:auto`.
 - **Claim boundary:** The extracted sequential model path is proven; those runs establish current service latency but not a stable wall-clock budget.
 
-### STANDALONE-AUTO-COMMIT__M2 — Parallel evidence and quiet personal automation — Active
-- **Unlock:** A developer gets materially shorter evidence waits on non-trivial sweeps, can type `gcm` anywhere, and can leave four canonical Idavoll repositories under a quiet ten-minute local commit cadence.
+### STANDALONE-AUTO-COMMIT__M2 — Parallel evidence and quiet personal automation — Complete
+- **Unlock / surviving result:** A developer gets bounded parallel evidence waits on non-trivial sweeps, can type `gcm` anywhere, and has four canonical Idavoll repositories under a quiet ten-minute local commit cadence.
 - **Working slice:** Dirty Git snapshot → deterministic evidence shards → concurrent Luna processes → full-manifest merge validation → Sol/commit; plus pinned global install → `gcm`; plus LaunchAgent dirty check → sequential per-repository one-shot run → user-library logs.
 - **vFinal advance:** Adds the requested latency and unattended operator journeys without changing commit format, Git authority, or push behavior.
 - **Experience bar:** Parallel phases remain legible by shard; clean scheduled checks produce no model process or repository noise; failed shards/scheduled runs are diagnosable from stable exit codes and log paths.
@@ -103,22 +105,25 @@
 - **Material risk:** Partial/out-of-order shard results omit or duplicate a change, sibling Codex processes leak after failure, or launchd runs a stale binary/environment and silently stops committing.
 - **Real journey proof:** The packed CLI commits a multi-shard temporary repository through the fake-Codex boundary with exact global coverage; a real run shows concurrent named Luna shards; a new shell resolves `gcm`; and the loaded LaunchAgent's program can be invoked against a clean fixture without starting `auto-commit`, then against a dirty fixture with one recorded invocation. Source-only partition tests or a plist syntax check do not count.
 - **Done when:** Multi-shard coverage/cancellation/progress guards pass, the new full-SHA package is pushed and installed globally/repinned, `gcm` resolves in a fresh zsh, the LaunchAgent is loaded at 600 seconds for the four explicit repositories, clean checks skip, dirty checks invoke once, and status/log locations are reported.
+- **Completion evidence:** The focused suite passed 36/36; standalone and game-repository live runs exercised two and four concurrent shards respectively; global/package/consumer resolution reports 0.2.0 at the full SHA; fresh zsh resolves `gcm`; fixture runs recorded zero clean and exactly one dirty invocation; and `launchctl print` reports the loaded label with a 600-second interval, zero eager runs, and stable stdout/stderr paths.
 
 ## 7) Current Motion
 
-- **Lane state:** Active; extraction is complete and parallel/personal automation is implementing.
+- **Lane state:** Complete; the package and personal entrypoints are installed and proven at their declared boundaries.
 - **Approval:** Erik's 2026-08-14 requests authorize the standalone push and consumer runs, then bounded parallel Luna extraction, global `gcm`, and a ten-minute local macOS job over the Idavoll repositories.
-- **Active rung:** `STANDALONE-AUTO-COMMIT__M2`
-- **Next action:** Run the 0.2.0 candidate through its own real multi-shard CLI, then push and pin that exact commit before installing the personal shell and launchd entrypoints.
-- **Claim boundary:** The pushed sequential package and both consumer runs are proven; deterministic multi-shard coverage/cancellation is proven through the focused journey suite, while a live parallel model run, global shell availability, and launchd scheduling are not yet proven.
+- **Active rung:** `STANDALONE-AUTO-COMMIT__M2` complete.
+- **Next action:** None inside this lane; the loaded scheduler owns subsequent dirty-repository sweeps and operators inspect its stable log paths when a run fails.
+- **Claim boundary:** Exact orchestration, cancellation, installation, shell resolution, dirty gating, and launchd registration are proven. Codex service latency and semantic quality remain external and variable; the live timings are observations, not a guaranteed performance budget.
 
 ## 8) Proof & Human Acceptance
 
 - **Existing source evidence:** `npx vitest run tests/core-flow__automatic-commit.spec.js` passed 34/34 on 2026-08-14 before extraction.
 - **Fresh package evidence:** `npm test` passed 35/35 on 2026-08-14, including the real temporary-Git journeys, repository-generic `Work-Spec:` rendering, and a tarball install followed by `node_modules/.bin/auto-commit --help`. `git diff --check`, Node syntax checks for every runtime file, direct `--help`, and `npm pack --dry-run` also passed; the tarball contains six intended runtime files and no runtime dependency manifest.
 - **Fresh M2 candidate evidence:** `npm test` passed 36/36 on 2026-08-14, including four concurrent disjoint Luna shards with exact 40-change coverage, named shard progress, deterministic merge validation, and sibling-process cancellation with no Sol call or commit after a forced shard failure. Node syntax checks, `git diff --check`, direct `--help`, and `npm pack --dry-run` passed; the 0.2.0 tarball contains seven intended runtime files and no runtime dependencies.
-- **Completed distribution evidence:** Remote `main` resolves `437c366a77d2c777478f520a0100996957b70a38`; both consumer manifests and lockfiles resolve that full SHA; backend run `2038ae4f618f` covered 15 changes and left a clean tree; game run `145daf6d5a33` covered 40 frozen changes while later edits remained eligible for the next sweep.
-- **Remaining fresh evidence:** Multi-shard suite/run, new immutable upstream ref, global alias resolution, and loaded clean-skip/dirty-run LaunchAgent behavior.
+- **M1 distribution evidence:** Release commit `437c366a77d2c777478f520a0100996957b70a38` was pushed and resolved by both consumer manifests/lockfiles; backend run `2038ae4f618f` covered 15 changes and left a clean tree; game run `145daf6d5a33` covered 40 frozen changes while later edits remained eligible for the next sweep.
+- **Fresh live parallel evidence:** Standalone commit `60b75c7c7564` ran two Luna shards in parallel (1m14s and 1m26s), merged four validated workstreams, and completed with Sol in 1m53s. Game commit `bbe7476b7767` ran four balanced shards (43s, 1m21s, 2m04s, and 2m14s), merged nine validated workstreams, and completed in 2m35s. Backend commit `e34d7fb64323` kept its seven-change, 114.2-KiB patch snapshot on one shard and completed in 1m30s, establishing the small-snapshot path without a misleading parallelism claim.
+- **Fresh installation evidence:** Remote `main`, the global package, and both consumer manifests/lockfiles resolve `60b75c7c7564f486b0f50a9021558d382c327625`; both installed consumer binaries report the parallel help contract and package 0.2.0. A fresh interactive zsh resolves `gcm='auto-commit --once'`. The scheduler adapter recorded zero invocations for a clean fixture and exactly one `--once` invocation for a mixed clean/dirty fixture. `launchctl print gui/501/com.erikhazzard.auto-commit` reports a loaded, idle LaunchAgent with `run interval = 600 seconds`, no eager run, and logs under `~/Library/Logs/auto-commit/`.
+- **Remaining fresh evidence:** None inside the declared lane.
 - **Blind spot:** Live Codex service latency and semantic variability remain external; the deterministic harness proves orchestration and validation, not model service speed.
 
 ## 9) Decisions & Supporting References

@@ -38,6 +38,15 @@ Confirm the installed command before its first write:
 npx auto-commit --help
 ```
 
+For a machine-wide command, install the same full SHA globally. npm 12 users whose Git dependency policy defaults to `none` can permit only the root package request for this invocation:
+
+```bash
+npm install --global --allow-git=root 'git+ssh://git@github.com/erikhazzard/auto-commit.git#FULL_COMMIT_SHA'
+alias gcm='auto-commit --once'
+```
+
+The alias intentionally does not run a separate `git add`: `auto-commit --once` owns staging and freezing the complete delta.
+
 ## Use
 
 Run one sweep:
