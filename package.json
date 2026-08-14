@@ -1,0 +1,27 @@
+{
+  "name": "@erikhazzard/auto-commit",
+  "version": "0.1.0",
+  "description": "Generate evidence-bound Git sweep commits with Codex.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/erikhazzard/auto-commit.git"
+  },
+  "bin": {
+    "auto-commit": "bin/auto-commit.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest run test/auto-commit.spec.js"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  }
+}
