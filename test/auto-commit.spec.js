@@ -108,6 +108,8 @@ const input = [];
 for await (const chunk of process.stdin) input.push(chunk);
 const prompt = Buffer.concat(input).toString('utf8');
 const outputPath = args[args.indexOf('--output-last-message') + 1];
+const outputSchemaPath = args[args.indexOf('--output-schema') + 1];
+const outputSchema = JSON.parse(fs.readFileSync(outputSchemaPath, 'utf8'));
 const logPath = process.env.FAKE_CODEX_LOG;
 function parseLoggedCalls(content) {
   return content.trim().split('\\n').filter(Boolean).flatMap((line) => {
@@ -129,6 +131,11 @@ if (logPath) {
     cwd: process.cwd(),
     inheritedPwd: process.env.PWD,
     hasGitIndexFile: Boolean(process.env.GIT_INDEX_FILE),
+    outputSchemaContract: {
+      snapshotIdEnum: outputSchema.properties?.snapshotId?.enum || null,
+      lunaValueCandidateMinimum: outputSchema.properties?.workstreams?.items?.properties?.valueCandidates?.minItems || 0,
+      lunaValueCandidateKinds: outputSchema.properties?.workstreams?.items?.properties?.valueCandidates?.items?.properties?.kind?.enum || null,
+    },
   }) + '\\n');
 }
 
@@ -195,15 +202,18 @@ if (model === 'gpt-5.6-luna') {
       description: key === 'product'
         ? 'Changes the creator-facing behavior represented by the staged source.'
         : 'Records the durable delivery contract for the automatic commit lane.',
-      userJourneyCandidate: key === 'product'
-        ? 'A creator uses the changed behavior, reaches the intended result, and can continue their task.'
-        : null,
-      developerJourneyCandidate: key === 'planning'
-        ? 'A maintainer can recover the lane contract and continue the implementation.'
-        : null,
-      engineeringUnlockCandidate: key === 'planning'
-        ? 'Maintainers can recover the lane contract and continue implementation without reconstructing intent.'
-        : null,
+      valueCandidates: key === 'product'
+        ? [{
+            kind: 'user_journey',
+            text: 'A creator uses the changed behavior, reaches the intended result, and can continue their task.',
+          }]
+        : [{
+            kind: 'developer_journey',
+            text: 'A maintainer can recover the lane contract and continue the implementation.',
+          }, {
+            kind: 'engineering_unlock',
+            text: 'Maintainers can recover the lane contract and continue implementation without reconstructing intent.',
+          }],
       proof: [{
         kind: 'staged_change',
         text: 'The staged diff contains the described change; it does not record an executed check.',
@@ -476,9 +486,10 @@ describe.sequential('automatic commit core flow', () => {
         title: 'Lane',
         changeIds: ['change-001'],
         description: 'Changes the lane.',
-        userJourneyCandidate: null,
-        developerJourneyCandidate: null,
-        engineeringUnlockCandidate: 'Maintainers can continue the lane.',
+        valueCandidates: [{
+          kind: 'engineering_unlock',
+          text: 'Maintainers can continue the lane.',
+        }],
         proof: [{ kind: 'staged_change', text: 'The staged change exists.', evidence: 'change-001' }],
         scope: ['Runtime was not exercised.'],
         workSpecs: [{
@@ -504,9 +515,10 @@ describe.sequential('automatic commit core flow', () => {
         title: 'Lane',
         changeIds: ['change-001'],
         description: 'Changes the lane.',
-        userJourneyCandidate: null,
-        developerJourneyCandidate: null,
-        engineeringUnlockCandidate: 'Maintainers can continue the lane.',
+        valueCandidates: [{
+          kind: 'engineering_unlock',
+          text: 'Maintainers can continue the lane.',
+        }],
         proof: [{ kind: 'staged_change', text: 'The staged change exists.', evidence: 'change-001' }],
         scope: ['Runtime was not exercised.'],
         workSpecs: [],
@@ -962,6 +974,18 @@ describe.sequential('automatic commit core flow', () => {
       expect(shardPacket.manifestOverview).toHaveLength(40);
       expect(shardPacket.patches.every((patch) => shardChangeIds.has(patch.changeId))).toBe(true);
     }
+    for (let index = 0; index < lunaCalls.length; index += 1) {
+      expect(lunaCalls[index].outputSchemaContract).toEqual({
+        snapshotIdEnum: [shardPackets[index].snapshotId],
+        lunaValueCandidateMinimum: 1,
+        lunaValueCandidateKinds: ['user_journey', 'developer_journey', 'engineering_unlock'],
+      });
+    }
+    expect(calls.find((call) => call.model === 'gpt-5.6-sol').outputSchemaContract).toEqual({
+      snapshotIdEnum: null,
+      lunaValueCandidateMinimum: 0,
+      lunaValueCandidateKinds: null,
+    });
     expect(lunaCalls.every((call) => call.prompt.length < 1_048_576)).toBe(true);
     expect(lunaCalls.some((call) => call.prompt.includes('[patch body omitted between bounded excerpts:'))).toBe(true);
     expect(lunaCalls.some((call) => call.prompt.includes('"path":"src/generated-39.js"'))).toBe(true);

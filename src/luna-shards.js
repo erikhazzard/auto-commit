@@ -131,10 +131,23 @@ export function mergeLunaShardReports({ packet, shardReports }) {
   if (!Array.isArray(shardReports) || shardReports.length === 0) {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', 'Luna returned no shard reports.');
   }
-  const workstreams = shardReports.flatMap((report, shardIndex) => report.workstreams.map((workstream, streamIndex) => ({
-    ...workstream,
-    id: `shard-${String(shardIndex + 1).padStart(2, '0')}-stream-${String(streamIndex + 1).padStart(2, '0')}`,
-  })));
+  const workstreams = shardReports.flatMap((report, shardIndex) => report.workstreams.map((workstream, streamIndex) => {
+    const {
+      userJourneyCandidate,
+      developerJourneyCandidate,
+      engineeringUnlockCandidate,
+      ...sharedWorkstream
+    } = workstream;
+    return {
+      ...sharedWorkstream,
+      id: `shard-${String(shardIndex + 1).padStart(2, '0')}-stream-${String(streamIndex + 1).padStart(2, '0')}`,
+      valueCandidates: [
+        userJourneyCandidate && { kind: 'user_journey', text: userJourneyCandidate },
+        developerJourneyCandidate && { kind: 'developer_journey', text: developerJourneyCandidate },
+        engineeringUnlockCandidate && { kind: 'engineering_unlock', text: engineeringUnlockCandidate },
+      ].filter(Boolean),
+    };
+  }));
   if (workstreams.length > MAXIMUM_MERGED_WORKSTREAMS) {
     throw new AutomaticCommitError(
       'INVALID_MODEL_OUTPUT',

@@ -66,6 +66,11 @@ const MESSAGE_WORKSTREAMS_MAX_CHARACTERS = 240;
 const MESSAGE_PROOF_MAX_CHARACTERS = 320;
 const MESSAGE_SCOPE_MAX_CHARACTERS = 280;
 const MAXIMUM_LUNA_WORKSTREAMS = 50;
+const LUNA_VALUE_CANDIDATE_KINDS = Object.freeze([
+  'user_journey',
+  'developer_journey',
+  'engineering_unlock',
+]);
 const REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const TERMINAL_HEADER = 'AUTO COMMIT';
 
@@ -108,9 +113,7 @@ const LUNA_REPORT_SCHEMA = Object.freeze({
           'title',
           'changeIds',
           'description',
-          'userJourneyCandidate',
-          'developerJourneyCandidate',
-          'engineeringUnlockCandidate',
+          'valueCandidates',
           'proof',
           'scope',
           'workSpecs',
@@ -124,9 +127,20 @@ const LUNA_REPORT_SCHEMA = Object.freeze({
             items: { type: 'string', minLength: 1, maxLength: 80 },
           },
           description: { type: 'string', minLength: 1, maxLength: 800 },
-          userJourneyCandidate: { type: ['string', 'null'], maxLength: 800 },
-          developerJourneyCandidate: { type: ['string', 'null'], maxLength: 800 },
-          engineeringUnlockCandidate: { type: ['string', 'null'], maxLength: 800 },
+          valueCandidates: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 3,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['kind', 'text'],
+              properties: {
+                kind: { enum: LUNA_VALUE_CANDIDATE_KINDS },
+                text: { type: 'string', minLength: 1, maxLength: 800 },
+              },
+            },
+          },
           proof: {
             type: 'array',
             minItems: 1,
@@ -211,11 +225,17 @@ const SOL_MESSAGE_SCHEMA = Object.freeze({
   },
 });
 
-function createLunaShardSchema(shardCount) {
+function createLunaShardSchema({ shardCount, snapshotId }) {
   return {
     ...LUNA_REPORT_SCHEMA,
     properties: {
       ...LUNA_REPORT_SCHEMA.properties,
+      // A free string let a real Luna response echo the wrong frozen snapshot and waste the one-shot run.
+      // Validation stays as defense in depth; this constraint makes that known-bad identity unrepresentable.
+      snapshotId: {
+        ...LUNA_REPORT_SCHEMA.properties.snapshotId,
+        enum: [snapshotId],
+      },
       workstreams: {
         ...LUNA_REPORT_SCHEMA.properties.workstreams,
         maxItems: Math.max(1, Math.floor(MAXIMUM_LUNA_WORKSTREAMS / shardCount)),
@@ -522,7 +542,7 @@ function buildLunaPrompt(packet) {
     '- Every assigned manifest change ID appears in exactly one workstream. Never claim an overview-only change ID assigned to another shard.',
     '- Use manifestOverview to recognize cross-file relationships, but derive detailed claims only from this shard’s manifest, patches, and bounded context.',
     '- Describe observable changed behavior, not file mechanics alone.',
-    '- For each stream, provide a user journey when a human-facing before → immediate goal → next-step bridge is evidenced, a developer journey when a maintainer/creator/reviewer workflow is evidenced, and/or an engineering unlock when a system capability is evidenced.',
+    '- For each stream, provide 1-3 unique valueCandidates: user_journey for an evidenced human-facing before → immediate goal → next-step bridge, developer_journey for an evidenced maintainer/creator/reviewer workflow, and/or engineering_unlock for an evidenced system capability.',
     '- Select work specs only from workSpecCandidates. Include every requiredWorkSpecPath with its supplied relationship. Optional related candidates come from bounded exact-path references; include only those the evidence connects to a stream.',
     '- Classify proof as staged_change unless the staged packet itself contains a concrete recorded command/result receipt. A changed test file is not an executed check.',
     '- Treat metadataOnly manifest rows as real changes that still require workstream coverage, but infer only from path/status/mode/size and explicitly scope that their content was omitted.',
@@ -651,27 +671,25 @@ export function validateLunaReport(rawReport, packet) {
       if (coveredChangeIds.has(changeId)) throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${changeId} appears in more than one workstream.`);
       coveredChangeIds.add(changeId);
     }
-    const userJourneyCandidate = normalizeSingleLine(stream.userJourneyCandidate, {
-      field: `${id}.userJourneyCandidate`,
-      maximumLength: 800,
-      nullable: true,
-    });
-    const developerJourneyCandidate = normalizeSingleLine(stream.developerJourneyCandidate, {
-      field: `${id}.developerJourneyCandidate`,
-      maximumLength: 800,
-      nullable: true,
-    });
-    const engineeringUnlockCandidate = normalizeSingleLine(stream.engineeringUnlockCandidate, {
-      field: `${id}.engineeringUnlockCandidate`,
-      maximumLength: 800,
-      nullable: true,
-    });
-    if (!userJourneyCandidate && !developerJourneyCandidate && !engineeringUnlockCandidate) {
-      throw new AutomaticCommitError(
-        'INVALID_MODEL_OUTPUT',
-        `${id} needs a user journey, developer journey, and/or engineering unlock.`,
-      );
+    if (!Array.isArray(stream.valueCandidates) || stream.valueCandidates.length < 1 || stream.valueCandidates.length > 3) {
+      throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id} needs 1-3 value candidates.`);
     }
+    const valueCandidates = new Map();
+    for (const [candidateIndex, candidate] of stream.valueCandidates.entries()) {
+      if (!LUNA_VALUE_CANDIDATE_KINDS.includes(candidate?.kind)) {
+        throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id}.valueCandidates[${candidateIndex}] has an invalid kind.`);
+      }
+      if (valueCandidates.has(candidate.kind)) {
+        throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id} duplicated ${candidate.kind}.`);
+      }
+      valueCandidates.set(candidate.kind, normalizeSingleLine(candidate.text, {
+        field: `${id}.valueCandidates[${candidateIndex}].text`,
+        maximumLength: 800,
+      }));
+    }
+    const userJourneyCandidate = valueCandidates.get('user_journey') || null;
+    const developerJourneyCandidate = valueCandidates.get('developer_journey') || null;
+    const engineeringUnlockCandidate = valueCandidates.get('engineering_unlock') || null;
     const proof = Array.isArray(stream.proof) ? stream.proof.map((item, proofIndex) => {
       if (!['staged_change', 'recorded_receipt'].includes(item?.kind)) {
         throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${id}.proof[${proofIndex}] has an invalid kind.`);
@@ -929,7 +947,9 @@ async function invokeCodex({
     });
     if (result.code !== 0) {
       const stderrLines = result.stderr.toString('utf8').trim().split(/\r?\n/u).filter(Boolean);
-      const failureDetail = (stderrLines.at(-1) || `exit ${result.code}`).slice(-2_000);
+      // Codex schema/API failures are multi-line diagnostics whose final line is often only `}`.
+      // Preserve the bounded tail so operators can act on the real rejection instead of a useless delimiter.
+      const failureDetail = (stderrLines.slice(-20).join('\n') || `exit ${result.code}`).slice(-2_000);
       throw new AutomaticCommitError(
         'CODEX_FAILED',
         `${model} failed: ${failureDetail}`,
@@ -1009,7 +1029,7 @@ async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory
           model: LUNA_MODEL,
           effort: LUNA_REASONING_EFFORT,
           prompt: buildLunaPrompt(lunaPacket),
-          schema: createLunaShardSchema(shardCount),
+          schema: createLunaShardSchema({ shardCount, snapshotId: lunaPacket.snapshotId }),
           tempDirectory,
           outputStem: `luna-report-${shardNumber}`,
           codexEnvironment,

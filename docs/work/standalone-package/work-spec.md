@@ -93,7 +93,7 @@
 - **Regenerate / inspect:** `npm test`, `npm pack --dry-run`, and each consumer's `npm run commit:auto`.
 - **Claim boundary:** The extracted sequential model path is proven; those runs establish current service latency but not a stable wall-clock budget.
 
-### STANDALONE-AUTO-COMMIT__M2 — Parallel evidence and quiet personal automation — Complete
+### STANDALONE-AUTO-COMMIT__M2 — Parallel evidence and quiet personal automation — Active
 - **Unlock / surviving result:** A developer gets bounded parallel evidence waits on non-trivial sweeps, can type `gcm` anywhere, and has four canonical Idavoll repositories under a quiet ten-minute local commit cadence.
 - **Working slice:** Dirty Git snapshot → deterministic evidence shards → concurrent Luna processes → full-manifest merge validation → Sol/commit; plus pinned global install → `gcm`; plus LaunchAgent dirty check → sequential per-repository one-shot run → user-library logs.
 - **vFinal advance:** Adds the requested latency and unattended operator journeys without changing commit format, Git authority, or push behavior.
@@ -109,21 +109,24 @@
 
 ## 7) Current Motion
 
-- **Lane state:** Complete; the package and personal entrypoints are installed and proven at their declared boundaries.
+- **Lane state:** Active; installed parallel execution is proven, but the first unattended interval exposed an underconstrained structured-output schema that can waste a full scheduled pass.
 - **Approval:** Erik's 2026-08-14 requests authorize the standalone push and consumer runs, then bounded parallel Luna extraction, global `gcm`, and a ten-minute local macOS job over the Idavoll repositories.
-- **Active rung:** `STANDALONE-AUTO-COMMIT__M2` complete.
-- **Next action:** None inside this lane; the loaded scheduler owns subsequent dirty-repository sweeps and operators inspect its stable log paths when a run fails.
-- **Claim boundary:** Exact orchestration, cancellation, installation, shell resolution, dirty gating, and launchd registration are proven. Codex service latency and semantic quality remain external and variable; the live timings are observations, not a guaranteed performance budget.
+- **Active rung:** `STANDALONE-AUTO-COMMIT__M2` repair at the Luna/Sol structured-output boundary.
+- **Next action:** Constrain Luna to the exact snapshot ID and require at least one journey/unlock candidate in both model schemas, then rerun the focused suite and real global/scheduled entrypoint before repinning.
+- **Claim boundary:** Exact orchestration, cancellation, installation, shell resolution, dirty gating, and launchd registration are proven. Safe refusal is proven for malformed semantic output, but unattended completion is not yet reliable enough because the schema admitted values deterministic validation must reject.
 
 ## 8) Proof & Human Acceptance
 
 - **Existing source evidence:** `npx vitest run tests/core-flow__automatic-commit.spec.js` passed 34/34 on 2026-08-14 before extraction.
 - **Fresh package evidence:** `npm test` passed 35/35 on 2026-08-14, including the real temporary-Git journeys, repository-generic `Work-Spec:` rendering, and a tarball install followed by `node_modules/.bin/auto-commit --help`. `git diff --check`, Node syntax checks for every runtime file, direct `--help`, and `npm pack --dry-run` also passed; the tarball contains six intended runtime files and no runtime dependency manifest.
 - **Fresh M2 candidate evidence:** `npm test` passed 36/36 on 2026-08-14, including four concurrent disjoint Luna shards with exact 40-change coverage, named shard progress, deterministic merge validation, and sibling-process cancellation with no Sol call or commit after a forced shard failure. Node syntax checks, `git diff --check`, direct `--help`, and `npm pack --dry-run` passed; the 0.2.0 tarball contains seven intended runtime files and no runtime dependencies.
+- **Fresh schema-repair candidate evidence:** `npm test` passed 36/36 on 2026-08-14 with the fake-Codex boundary asserting an exact per-shard snapshot-ID enum and a minimum-one typed Luna value-candidate array. Node syntax, `git diff --check`, and the seven-file zero-runtime-dependency 0.2.1 pack boundary passed; Sol retains its existing semantic validator and one bounded correction pass.
 - **M1 distribution evidence:** Release commit `437c366a77d2c777478f520a0100996957b70a38` was pushed and resolved by both consumer manifests/lockfiles; backend run `2038ae4f618f` covered 15 changes and left a clean tree; game run `145daf6d5a33` covered 40 frozen changes while later edits remained eligible for the next sweep.
 - **Fresh live parallel evidence:** Standalone commit `60b75c7c7564` ran two Luna shards in parallel (1m14s and 1m26s), merged four validated workstreams, and completed with Sol in 1m53s. Game commit `bbe7476b7767` ran four balanced shards (43s, 1m21s, 2m04s, and 2m14s), merged nine validated workstreams, and completed in 2m35s. Backend commit `e34d7fb64323` kept its seven-change, 114.2-KiB patch snapshot on one shard and completed in 1m30s, establishing the small-snapshot path without a misleading parallelism claim.
-- **Fresh installation evidence:** Remote `main`, the global package, and both consumer manifests/lockfiles resolve `60b75c7c7564f486b0f50a9021558d382c327625`; both installed consumer binaries report the parallel help contract and package 0.2.0. A fresh interactive zsh resolves `gcm='auto-commit --once'`. The scheduler adapter recorded zero invocations for a clean fixture and exactly one `--once` invocation for a mixed clean/dirty fixture. `launchctl print gui/501/com.erikhazzard.auto-commit` reports a loaded, idle LaunchAgent with `run interval = 600 seconds`, no eager run, and logs under `~/Library/Logs/auto-commit/`.
-- **Remaining fresh evidence:** None inside the declared lane.
+- **Fresh installation evidence:** The upstream remote contains immutable release commit `60b75c7c7564f486b0f50a9021558d382c327625`; the global package and both consumer manifests/lockfiles resolve it as package 0.2.0. A fresh interactive zsh resolves `gcm='auto-commit --once'`. The scheduler adapter recorded zero invocations for a clean fixture and exactly one `--once` invocation for a mixed clean/dirty fixture. `launchctl print gui/501/com.erikhazzard.auto-commit` reports a loaded LaunchAgent with `run interval = 600 seconds` and logs under `~/Library/Logs/auto-commit/`.
+- **Escaped scheduled failure:** The first real LaunchAgent interval started as configured and left Git state safe, but its game-repository run rejected a schema-shaped Luna stream with no journey or unlock; an earlier real `gcm` attempt similarly rejected a wrong snapshot echo before the unchanged retry committed `b9431a3bd731`. These are model-output-schema gaps, not Git, auth, alias, launchd, or shard-cancellation failures.
+- **Repair finding:** A direct `anyOf` constraint was rejected before model execution because this structured-output surface requires every object branch to close `additionalProperties`; the lasting supported shape is a required `valueCandidates` array with `minItems: 1`, typed kinds, and duplicate-kind validation. Codex failure reporting now preserves the bounded multi-line diagnostic instead of only its final `}`.
+- **Remaining fresh evidence:** Tightened schema at the fake-Codex boundary, a real structured-output run through the repinned package, and a subsequent loaded scheduler result.
 - **Blind spot:** Live Codex service latency and semantic variability remain external; the deterministic harness proves orchestration and validation, not model service speed.
 
 ## 9) Decisions & Supporting References
