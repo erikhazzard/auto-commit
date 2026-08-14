@@ -70,10 +70,13 @@ function intersectsAssignedChanges(item, assignedChangeIds) {
 function compactManifestOverview(manifest) {
   return manifest.map((change) => ({
     id: change.id,
+    kind: change.kind,
     status: change.status,
     oldPath: change.oldPath,
     path: change.path,
+    entryCount: change.entryCount,
     metadataOnly: change.metadataOnly,
+    evidenceDisposition: change.evidenceDisposition,
   }));
 }
 

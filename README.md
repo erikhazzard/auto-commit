@@ -73,7 +73,9 @@ Watch mode runs in the foreground, waits for a quiet change window, responds to 
 
 Interactive progress is written to stderr as a timestamped phase rail. Redirected stderr degrades to timestamped plain text. A successful one-shot invocation writes the final commit identity to stdout.
 
-Non-trivial snapshots are split into as many as four size-balanced Luna shards. Each shard receives a disjoint set of detailed changes, all shards run concurrently, and the runtime revalidates exact full-snapshot coverage before invoking Sol. Small snapshots naturally use one Luna call. Any shard failure cancels its siblings and leaves the staged work uncommitted.
+Non-trivial snapshots are split into as many as four size-balanced Luna shards. Each shard receives a disjoint set of evidence entries, all shards run concurrently, and the runtime revalidates exact full-snapshot coverage before invoking Sol. Small snapshots naturally use one Luna call. Any shard failure cancels its siblings and leaves the staged work uncommitted.
+
+Large sweeps are compacted before model invocation without changing the frozen Git tree. A fully removed directory containing at least 20 files becomes one digest-backed deletion entry; if the remaining evidence would still overfill the model budget, coherent path cohorts are progressively replaced by bounded status/sample/type/digest summaries. Every raw path still participates in safety checks and work-spec discovery. Recognized dependency lockfiles remain staged and are committed exactly, but their patch bodies are omitted from model context and represented as metadata-only supporting changes. There is no fixed changed-file count or model-packet-size rejection: evidence becomes more summarized as the sweep grows.
 
 ## What the message contains
 

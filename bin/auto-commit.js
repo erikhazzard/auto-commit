@@ -474,15 +474,29 @@ function summarizeEvidencePacketBytes(packet) {
     0,
   );
   const historyBytes = Buffer.byteLength(packet.recentCommits);
+  const rawChangeCount = packet.rawChangeCount || packet.manifest.length;
+  const compaction = packet.evidenceCompaction || {};
+  const changeDetail = rawChangeCount === packet.manifest.length
+    ? `${rawChangeCount} change${rawChangeCount === 1 ? '' : 's'}`
+    : `${rawChangeCount} Git changes → ${packet.manifest.length} evidence entries`;
   return {
     totalBytes,
     prettyDetail: [
-      `${packet.manifest.length} change${packet.manifest.length === 1 ? '' : 's'}`,
+      changeDetail,
+      compaction.summarizedDeletionCount
+        ? `${compaction.summarizedDeletionCount} deletions in ${compaction.summarizedDeletionGroupCount} subtree${compaction.summarizedDeletionGroupCount === 1 ? '' : 's'}`
+        : null,
+      compaction.dependencyLockfileCount
+        ? `${compaction.dependencyLockfileCount} lockfile${compaction.dependencyLockfileCount === 1 ? '' : 's'} metadata-only`
+        : null,
+      compaction.adaptiveGroupedChangeCount
+        ? `${compaction.adaptiveGroupedChangeCount} changes in ${compaction.adaptiveGroupCount} adaptive summar${compaction.adaptiveGroupCount === 1 ? 'y' : 'ies'}`
+        : null,
       `${formatByteCount(patchBytes)} patch`,
       `${formatByteCount(agentContextBytes)} agents`,
       `${formatByteCount(workSpecContextBytes)} specs`,
       `${formatByteCount(historyBytes)} history`,
-    ].join(' · '),
+    ].filter(Boolean).join(' · '),
     summary: [
       `${formatByteCount(totalBytes)} total`,
       `${formatByteCount(patchBytes)} patch`,
@@ -597,6 +611,7 @@ export function formatAutomaticCommitHelp() {
     'Set NO_COLOR=1 to disable color. Redirected output remains plain.',
     'This command stages and commits every settled change in the current repository.',
     'Non-trivial snapshots use up to four parallel Luna evidence calls before one Sol writing pass.',
+    'Large sweeps compact adaptively instead of failing a file/token ceiling; lockfile bodies remain out of model context.',
     'It never pushes or rewrites history.',
     '',
   ].join('\n');
@@ -630,7 +645,7 @@ function buildLunaPrompt(packet) {
     '- For each stream, provide 1-3 valueCandidates: user_journey for an evidenced human-facing before → immediate goal → next-step bridge, developer_journey for an evidenced maintainer/creator/reviewer workflow, and/or engineering_unlock for an evidenced system capability. Use each kind at most once; combine same-kind ideas into one sentence.',
     '- Work specs are optional. Select them only from workSpecCandidates, and return none when that list is empty; never assume the repository uses docs/work or any work-spec convention. Include every requiredWorkSpecPath with its supplied relationship. Optional related candidates come from bounded exact-path references; include only those the evidence connects to a stream.',
     '- Classify proof as staged_change unless the staged packet itself contains a concrete recorded command/result receipt. A receipt includes both the command and its recorded outcome. A changed test file is not an executed check, and prior terminal output is not part of this frozen packet.',
-    '- Treat metadataOnly manifest rows as real changes that still require workstream coverage, but infer only from path/status/mode/size and explicitly scope that their content was omitted.',
+    '- Treat metadataOnly manifest rows as real evidence units that still require workstream coverage, but infer only from supplied metadata. A deleted_path_group row accounts for exactly entryCount deleted paths under its path and should be described as one coherent subtree removal. A changed_path_group row is an adaptive summary of entryCount raw changes under its path; use its status counts, samples, file types, and digest without inventing omitted implementation detail. A dependency-lockfile row is supporting dependency state; do not make it the subject or a value claim when substantive evidence exists.',
     '- Name unexercised scope only when it is specific and meaningful to this change; use an empty scope array instead of generic boilerplate.',
     '',
     'Constraints:',
@@ -1087,14 +1102,17 @@ async function invokeCodex({
  * - One bounded Sol retry receives only the validation failure; a second failure stops the commit.
  */
 async function generateCommitMessage({ codexBin, repoRoot, packet, tempDirectory, codexEnvironment, log, signal }) {
-  const changeLabel = `${packet.manifest.length} staged change${packet.manifest.length === 1 ? '' : 's'}`;
+  const rawChangeCount = packet.rawChangeCount || packet.manifest.length;
+  const changeLabel = `${rawChangeCount} staged change${rawChangeCount === 1 ? '' : 's'}`;
   const lunaPackets = createLunaShardPackets(packet);
   const shardCount = lunaPackets.length;
   log(`Luna ${LUNA_REASONING_EFFORT} is accounting for ${changeLabel} across ${shardCount} shard${shardCount === 1 ? '' : 's'}...`, {
     phase: 'LUNA',
     state: 'active',
     gapBefore: true,
-    prettyMessage: shardCount === 1 ? `Accounting for ${changeLabel}` : `Dispatching ${shardCount} evidence shards`,
+      prettyMessage: shardCount === 1
+        ? `Accounting for ${changeLabel}`
+        : `Dispatching ${shardCount} evidence shards for ${changeLabel}`,
     metric: shardCount === 1 ? LUNA_REASONING_EFFORT : `${LUNA_REASONING_EFFORT} · parallel`,
   });
   const shardAbortController = new AbortController();

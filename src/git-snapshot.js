@@ -27,7 +27,7 @@ import path from 'node:path';
 
 const PROCESS_TERMINATION_GRACE_MS = 5_000;
 const STAGE_RECHECK_MS = 150;
-const MAX_PROCESS_STDOUT_BYTES = 8 * 1024 * 1024;
+const MAX_PROCESS_STDOUT_BYTES = 128 * 1024 * 1024;
 const MAX_PROCESS_STDERR_BYTES = 96 * 1024;
 
 export class AutomaticCommitError extends Error {

@@ -7,7 +7,7 @@
  * @intent
  * Give both models complete snapshot evidence without silently truncating large or binary inputs.
  * @invariants
- * - Every manifest row comes from the captured base plus frozen index.
+ * - Every manifest row comes from one or more entries in the captured base plus frozen index.
  * - Secrets are checked before repository content reaches either model.
  * - Direct/owning work specs are mandatory; broad exact-reference matches are bounded suggestions.
  */
@@ -21,11 +21,17 @@ import {
   runProcess,
 } from './git-snapshot.js';
 
-const MAX_CHANGED_ENTRIES = 500;
+const TARGET_EVIDENCE_ENTRIES = 160;
+const TARGET_EVIDENCE_MANIFEST_BYTES = 160_000;
+const MIN_DELETED_PATH_GROUP_ENTRIES = 20;
+const MAX_PATH_GROUP_SAMPLES = 6;
+const LFS_ATTRIBUTE_PATH_BATCH_SIZE = 500;
+const MAX_RAW_MANIFEST_BYTES = 128 * 1024 * 1024;
 const MAX_PER_FILE_DIFF_BYTES = 2_000_000;
 const MAX_PATCH_CONTEXT_BYTES = 300_000;
-const MAX_PACKET_BYTES = 850_000;
+const MAX_DIFF_STAT_CONTEXT_BYTES = 32_000;
 const MAX_NON_LFS_BLOB_BYTES = 10 * 1024 * 1024;
+const MAX_SECRET_SCAN_BATCH_BYTES = 16 * 1024 * 1024;
 const MAX_CONTEXT_DOCUMENT_BYTES = 48_000;
 const MAX_AGENT_CONTRACT_CONTEXT_BYTES = 64_000;
 const MAX_WORK_SPEC_CONTEXT_BYTES = 96_000;
@@ -33,6 +39,29 @@ const MAX_REQUIRED_WORK_SPECS = 200;
 const MAX_RELATED_WORK_SPEC_SUGGESTIONS = 30;
 
 const BINARY_FILE_EXTENSION_PATTERN = /\.(?:avif|bin|blend|bmp|br|bz2|dae|fbx|flac|gif|glb|gltfpack|gz|ico|jpeg|jpg|ktx2|m4a|mp3|mp4|ogg|otf|pdf|png|tar|ttf|wav|webm|webp|woff2?|zip)$/i;
+const DEPENDENCY_LOCKFILE_NAMES = new Set([
+  'bun.lock',
+  'bun.lockb',
+  'cargo.lock',
+  'composer.lock',
+  'deno.lock',
+  'flake.lock',
+  'gemfile.lock',
+  'go.sum',
+  'mix.lock',
+  'npm-shrinkwrap.json',
+  'package-lock.json',
+  'package.resolved',
+  'packages.lock.json',
+  'paket.lock',
+  'pipfile.lock',
+  'pnpm-lock.yaml',
+  'podfile.lock',
+  'poetry.lock',
+  'pubspec.lock',
+  'uv.lock',
+  'yarn.lock',
+]);
 const SECRET_PATTERNS = Object.freeze([
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/],
   ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
@@ -105,6 +134,7 @@ async function readBlobSizes({ repoRoot, oids, env, signal }) {
     env,
     input: `${uniqueOids.join('\n')}\n`,
     timeoutMs: 120_000,
+    maximumStdoutBytes: Math.max(1_048_576, uniqueOids.length * 160),
     signal,
   });
   if (result.code !== 0) {
@@ -121,24 +151,26 @@ async function readBlobSizes({ repoRoot, oids, env, signal }) {
 
 async function readLfsTrackedPaths({ repoRoot, changedPaths, env, signal }) {
   if (changedPaths.length === 0) return new Set();
-  const result = await runGitCommand({
-    repoRoot,
-    args: ['check-attr', '--cached', '-z', 'filter', '--', ...changedPaths],
-    env,
-    signal,
-  });
-  const values = splitNullTerminated(result.stdout);
   const lfsPaths = new Set();
-  for (let index = 0; index + 2 < values.length; index += 3) {
-    if (values[index + 1] === 'filter' && values[index + 2] === 'lfs') lfsPaths.add(values[index]);
+  for (let start = 0; start < changedPaths.length; start += LFS_ATTRIBUTE_PATH_BATCH_SIZE) {
+    const result = await runGitCommand({
+      repoRoot,
+      args: [
+        'check-attr', '--cached', '-z', 'filter', '--',
+        ...changedPaths.slice(start, start + LFS_ATTRIBUTE_PATH_BATCH_SIZE),
+      ],
+      env,
+      signal,
+    });
+    const values = splitNullTerminated(result.stdout);
+    for (let index = 0; index + 2 < values.length; index += 3) {
+      if (values[index + 1] === 'filter' && values[index + 2] === 'lfs') lfsPaths.add(values[index]);
+    }
   }
   return lfsPaths;
 }
 
 function assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap, lfsTrackedPaths }) {
-  if (changes.length > MAX_CHANGED_ENTRIES) {
-    throw new AutomaticCommitError('TOO_MANY_CHANGES', `Refusing ${changes.length} changed entries; maximum is ${MAX_CHANGED_ENTRIES}.`);
-  }
   for (const change of changes) {
     for (const changedPath of [change.oldPath, change.path].filter(Boolean)) {
       if (changedPath.includes('\uFFFD')) {
@@ -172,6 +204,255 @@ function assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap, lfsTrack
       throw new AutomaticCommitError('MATERIALIZED_SKILL_PATH', `${protectedSymlinkPath} must remain a mode-120000 symlink.`);
     }
   }
+}
+
+function isDependencyLockfile(filePath) {
+  return DEPENDENCY_LOCKFILE_NAMES.has(path.posix.basename(filePath).toLowerCase());
+}
+
+function collectPopulatedDirectories(stageMap) {
+  const populatedDirectories = new Set();
+  for (const stagedPath of stageMap.keys()) {
+    for (let directory = path.posix.dirname(stagedPath); directory !== '.' && directory !== '/';) {
+      populatedDirectories.add(directory);
+      const parent = path.posix.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return populatedDirectories;
+}
+
+function findRemovedSubtreeRoot(filePath, populatedDirectories) {
+  let removedRoot = null;
+  for (let directory = path.posix.dirname(filePath); directory !== '.' && directory !== '/';) {
+    if (populatedDirectories.has(directory)) break;
+    removedRoot = directory;
+    const parent = path.posix.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return removedRoot;
+}
+
+function selectBoundarySamples(values, maximumItems) {
+  if (values.length <= maximumItems) return values;
+  const headCount = Math.ceil(maximumItems / 2);
+  const tailCount = Math.floor(maximumItems / 2);
+  return [...values.slice(0, headCount), ...values.slice(-tailCount)];
+}
+
+function summarizeFileTypes(filePaths) {
+  const counts = new Map();
+  for (const filePath of filePaths) {
+    const extension = path.posix.extname(filePath).toLowerCase() || '[no extension]';
+    counts.set(extension, (counts.get(extension) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 12)
+    .map(([type, count]) => ({ type, count }));
+}
+
+function summarizeStatuses(changes) {
+  const counts = new Map();
+  for (const change of changes) counts.set(change.status, (counts.get(change.status) || 0) + 1);
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([status, count]) => ({ status, count }));
+}
+
+function createPathGroupUnit({ members, groupPath, kind, evidenceDisposition, blobSizes, orderByChangeId }) {
+  const sortedMembers = [...members].sort((left, right) => orderByChangeId.get(left.id) - orderByChangeId.get(right.id));
+  const memberPaths = [...new Set(sortedMembers.flatMap((member) => [member.oldPath, member.path]).filter(Boolean))].sort();
+  const statuses = summarizeStatuses(sortedMembers);
+  return {
+    id: sortedMembers[0].id,
+    kind,
+    status: statuses.length === 1 ? statuses[0].status : 'mixed',
+    statusCounts: statuses,
+    path: groupPath,
+    entryCount: sortedMembers.length,
+    samplePaths: selectBoundarySamples(memberPaths, MAX_PATH_GROUP_SAMPLES),
+    fileTypes: summarizeFileTypes(memberPaths),
+    pathsSha256: hashBuffer(Buffer.from(sortedMembers
+      .map((member) => `${member.status}\0${member.oldPath || ''}\0${member.path}`)
+      .join('\0'))),
+    oldBlobSize: sortedMembers.reduce((total, member) => total + (blobSizes.get(member.oldOid) || 0), 0),
+    blobSize: sortedMembers.reduce((total, member) => total + (blobSizes.get(member.newOid) || 0), 0),
+    metadataOnly: true,
+    evidenceDisposition,
+    _members: sortedMembers,
+    _order: orderByChangeId.get(sortedMembers[0].id),
+  };
+}
+
+function pathDepth(filePath) {
+  return filePath.split('/').filter(Boolean).length;
+}
+
+function serializedEvidenceUnitsBytes(units) {
+  return Buffer.byteLength(JSON.stringify(units.map(({ _members, _order, ...unit }) => unit)));
+}
+
+function compactEvidenceUnits(units, { blobSizes, orderByChangeId }) {
+  let compactedUnits = units;
+  while (
+    compactedUnits.length > TARGET_EVIDENCE_ENTRIES
+    || serializedEvidenceUnitsBytes(compactedUnits) > TARGET_EVIDENCE_MANIFEST_BYTES
+  ) {
+    const manifestBytes = serializedEvidenceUnitsBytes(compactedUnits);
+    const byteBoundEntryTarget = manifestBytes > TARGET_EVIDENCE_MANIFEST_BYTES
+      ? Math.max(1, Math.floor(compactedUnits.length * TARGET_EVIDENCE_MANIFEST_BYTES / manifestBytes))
+      : compactedUnits.length;
+    const entryTarget = Math.min(TARGET_EVIDENCE_ENTRIES, byteBoundEntryTarget);
+    const candidatesByDirectory = new Map();
+    for (const unit of compactedUnits) {
+      for (let directory = path.posix.dirname(unit.path); directory !== '.' && directory !== '/';) {
+        if (!candidatesByDirectory.has(directory)) candidatesByDirectory.set(directory, []);
+        candidatesByDirectory.get(directory).push(unit);
+        const parent = path.posix.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+    }
+    const candidates = [...candidatesByDirectory]
+      .filter(([, members]) => members.length >= 2)
+      .sort((left, right) => (
+        pathDepth(right[0]) - pathDepth(left[0])
+        || right[1].length - left[1].length
+        || left[0].localeCompare(right[0])
+      ));
+    const selectedUnits = new Set();
+    const groupedUnits = [];
+    let projectedCount = compactedUnits.length;
+    for (const [directory, candidateUnits] of candidates) {
+      const availableUnits = candidateUnits.filter((unit) => !selectedUnits.has(unit));
+      if (availableUnits.length < 2) continue;
+      for (const unit of availableUnits) selectedUnits.add(unit);
+      groupedUnits.push(createPathGroupUnit({
+        members: availableUnits.flatMap((unit) => unit._members),
+        groupPath: directory,
+        kind: 'changed_path_group',
+        evidenceDisposition: 'adaptive-path-summary',
+        blobSizes,
+        orderByChangeId,
+      }));
+      projectedCount -= availableUnits.length - 1;
+      if (projectedCount <= entryTarget) break;
+    }
+
+    if (groupedUnits.length === 0) {
+      if (compactedUnits.length === 1) break;
+      const unitsToCollapse = compactedUnits.length - entryTarget + 1;
+      const fallbackUnits = compactedUnits.slice(0, unitsToCollapse);
+      for (const unit of fallbackUnits) selectedUnits.add(unit);
+      groupedUnits.push(createPathGroupUnit({
+        members: fallbackUnits.flatMap((unit) => unit._members),
+        groupPath: '.',
+        kind: 'changed_path_group',
+        evidenceDisposition: 'adaptive-path-summary',
+        blobSizes,
+        orderByChangeId,
+      }));
+    }
+    compactedUnits = [
+      ...compactedUnits.filter((unit) => !selectedUnits.has(unit)),
+      ...groupedUnits,
+    ].sort((left, right) => left._order - right._order);
+  }
+  return compactedUnits;
+}
+
+function buildEvidenceManifest({ changes, blobSizes, stageMap }) {
+  const orderByChangeId = new Map(changes.map((change, index) => [change.id, index]));
+  const populatedDirectories = collectPopulatedDirectories(stageMap);
+  const deletedMembersByRoot = new Map();
+  for (const change of changes) {
+    if (change.status !== 'D') continue;
+    const removedRoot = findRemovedSubtreeRoot(change.path, populatedDirectories);
+    if (!removedRoot) continue;
+    if (!deletedMembersByRoot.has(removedRoot)) deletedMembersByRoot.set(removedRoot, []);
+    deletedMembersByRoot.get(removedRoot).push(change);
+  }
+  const retainedDeletedGroups = new Map([...deletedMembersByRoot]
+    .filter(([, members]) => members.length >= MIN_DELETED_PATH_GROUP_ENTRIES));
+  const deletedGroupByChangeId = new Map();
+  for (const [removedRoot, members] of retainedDeletedGroups) {
+    for (const member of members) deletedGroupByChangeId.set(member.id, removedRoot);
+  }
+
+  const evidenceUnits = [];
+  const emittedDeletedGroups = new Set();
+  let dependencyLockfileCount = 0;
+  let summarizedDeletionCount = 0;
+  for (const change of changes) {
+    const deletedGroupRoot = deletedGroupByChangeId.get(change.id);
+    if (deletedGroupRoot) {
+      const members = retainedDeletedGroups.get(deletedGroupRoot);
+      if (emittedDeletedGroups.has(deletedGroupRoot)) continue;
+      emittedDeletedGroups.add(deletedGroupRoot);
+      summarizedDeletionCount += members.length;
+      evidenceUnits.push(createPathGroupUnit({
+        members,
+        groupPath: deletedGroupRoot,
+        kind: 'deleted_path_group',
+        evidenceDisposition: 'deleted-subtree-summary',
+        blobSizes,
+        orderByChangeId,
+      }));
+      continue;
+    }
+
+    const oldBlobSize = blobSizes.get(change.oldOid) || 0;
+    const blobSize = blobSizes.get(change.newOid) || 0;
+    const dependencyLockfile = isDependencyLockfile(change.path)
+      || (change.oldPath ? isDependencyLockfile(change.oldPath) : false);
+    const binaryFile = BINARY_FILE_EXTENSION_PATTERN.test(change.path)
+      || (change.oldPath ? BINARY_FILE_EXTENSION_PATTERN.test(change.oldPath) : false);
+    const oversizedFile = Math.max(oldBlobSize, blobSize) > 512_000;
+    if (dependencyLockfile) dependencyLockfileCount += 1;
+    const manifestEntry = {
+      ...change,
+      oldBlobSize,
+      blobSize,
+      metadataOnly: dependencyLockfile || binaryFile || oversizedFile,
+    };
+    if (dependencyLockfile) manifestEntry.evidenceDisposition = 'dependency-lockfile';
+    else if (binaryFile) manifestEntry.evidenceDisposition = 'binary-or-media';
+    else if (oversizedFile) manifestEntry.evidenceDisposition = 'oversized-content';
+    evidenceUnits.push({
+      ...manifestEntry,
+      _members: [change],
+      _order: orderByChangeId.get(change.id),
+    });
+  }
+
+  const compactedUnits = compactEvidenceUnits(evidenceUnits, { blobSizes, orderByChangeId });
+  const evidenceIdByRawChangeId = new Map();
+  for (const unit of compactedUnits) {
+    for (const member of unit._members) evidenceIdByRawChangeId.set(member.id, unit.id);
+  }
+  const metadataOnlyEvidenceIds = new Set(compactedUnits
+    .filter((unit) => unit.metadataOnly)
+    .map((unit) => unit.id));
+  const metadataOnlyChanges = changes
+    .filter((change) => metadataOnlyEvidenceIds.has(evidenceIdByRawChangeId.get(change.id)))
+    .map((change) => ({ ...change, metadataOnly: true }));
+  const manifest = compactedUnits.map(({ _members, _order, ...unit }) => unit);
+  const adaptiveGroups = manifest.filter((unit) => unit.kind === 'changed_path_group');
+  return {
+    manifest,
+    evidenceIdByRawChangeId,
+    metadataOnlyChanges,
+    summary: {
+      dependencyLockfileCount,
+      summarizedDeletionCount,
+      summarizedDeletionGroupCount: retainedDeletedGroups.size,
+      adaptiveGroupedChangeCount: adaptiveGroups.reduce((total, group) => total + group.entryCount, 0),
+      adaptiveGroupCount: adaptiveGroups.length,
+    },
+  };
 }
 
 function findSecretViolation(text) {
@@ -244,16 +525,20 @@ async function readBoundedTextContext({
   };
 }
 
-function createBoundedPatchExcerpt(patch, maximumBytes, label) {
-  const patchBuffer = Buffer.from(patch);
-  if (patchBuffer.length <= maximumBytes) return patch;
-  const marker = `\n[patch body omitted between bounded excerpts: ${patchBuffer.length} bytes; sha256 ${hashBuffer(patchBuffer)}; ${label}]\n`;
+function createBoundedExcerpt(content, maximumBytes, { label, bodyLabel }) {
+  const contentBuffer = Buffer.from(content);
+  if (contentBuffer.length <= maximumBytes) return content;
+  const marker = `\n[${bodyLabel} omitted between bounded excerpts: ${contentBuffer.length} bytes; sha256 ${hashBuffer(contentBuffer)}; ${label}]\n`;
   const excerptBytes = Math.max(0, maximumBytes - Buffer.byteLength(marker));
   const headBytes = Math.ceil(excerptBytes * 0.7);
   const tailBytes = Math.max(0, excerptBytes - headBytes);
-  const head = decodeUtf8Head(patchBuffer.subarray(0, headBytes));
-  const tail = decodeUtf8Tail(patchBuffer.subarray(Math.max(headBytes, patchBuffer.length - tailBytes)));
+  const head = decodeUtf8Head(contentBuffer.subarray(0, headBytes));
+  const tail = decodeUtf8Tail(contentBuffer.subarray(Math.max(headBytes, contentBuffer.length - tailBytes)));
   return `${head}${marker}${tail}`;
+}
+
+function createBoundedPatchExcerpt(patch, maximumBytes, label) {
+  return createBoundedExcerpt(patch, maximumBytes, { label, bodyLabel: 'patch body' });
 }
 
 async function readBoundedPatches({ repoRoot, baseOid, manifest, env, signal }) {
@@ -289,24 +574,60 @@ async function readBoundedPatches({ repoRoot, baseOid, manifest, env, signal }) 
   return excerpts;
 }
 
-async function scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, env, signal }) {
-  const scannedOids = new Set();
+async function scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, blobSizes, env, signal }) {
+  const pendingOids = [];
+  const seenOids = new Set();
   for (const change of manifest) {
-    if (!change.metadataOnly || /^0+$/.test(change.newOid) || scannedOids.has(change.newOid)) continue;
-    scannedOids.add(change.newOid);
-    const result = await runGitCommand({
-      repoRoot,
-      args: ['cat-file', 'blob', change.newOid],
+    if (!change.metadataOnly || !change.newOid || /^0+$/.test(change.newOid) || seenOids.has(change.newOid)) continue;
+    seenOids.add(change.newOid);
+    pendingOids.push(change.newOid);
+  }
+  for (let start = 0; start < pendingOids.length;) {
+    const batch = [];
+    let batchBlobBytes = 0;
+    while (start < pendingOids.length) {
+      const oid = pendingOids[start];
+      const blobSize = blobSizes.get(oid) || 0;
+      if (batch.length > 0 && batchBlobBytes + blobSize > MAX_SECRET_SCAN_BATCH_BYTES) break;
+      batch.push({ oid, blobSize });
+      batchBlobBytes += blobSize;
+      start += 1;
+    }
+    const result = await runProcess({
+      command: 'git',
+      args: ['cat-file', '--batch'],
+      cwd: repoRoot,
       env,
-      maximumStdoutBytes: MAX_NON_LFS_BLOB_BYTES,
+      input: `${batch.map(({ oid }) => oid).join('\n')}\n`,
+      timeoutMs: 120_000,
+      maximumStdoutBytes: batchBlobBytes + (batch.length * 160),
       signal,
     });
-    const secretViolation = findSecretViolation(result.stdout.toString('latin1'));
-    if (secretViolation) {
-      throw new AutomaticCommitError(
-        'SECRET_DETECTED',
-        `A high-confidence ${secretViolation} signature was found in metadata-only staged content; no model was called.`,
-      );
+    if (result.code !== 0) {
+      throw new AutomaticCommitError('GIT_COMMAND_FAILED', 'git cat-file failed while scanning metadata-only content.');
+    }
+    let offset = 0;
+    for (const expected of batch) {
+      const headerEnd = result.stdout.indexOf(10, offset);
+      if (headerEnd < 0) throw new AutomaticCommitError('INVALID_GIT_OUTPUT', 'Missing git cat-file batch header.');
+      const header = result.stdout.subarray(offset, headerEnd).toString('utf8');
+      const match = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(header);
+      if (!match || match[1] !== expected.oid || Number.parseInt(match[2], 10) !== expected.blobSize) {
+        throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `Unexpected git cat-file batch row: ${header}`);
+      }
+      const contentStart = headerEnd + 1;
+      const contentEnd = contentStart + expected.blobSize;
+      if (contentEnd >= result.stdout.length || result.stdout[contentEnd] !== 10) {
+        throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `Incomplete git cat-file content for ${expected.oid}.`);
+      }
+      const secretViolation = findSecretViolation(result.stdout.subarray(contentStart, contentEnd).toString('latin1'));
+      if (secretViolation) {
+        throw new AutomaticCommitError(
+          'SECRET_DETECTED',
+          `A high-confidence ${secretViolation} signature was found in metadata-only staged content; no model was called.`,
+        );
+      }
+      offset = contentEnd + 1;
     }
   }
 }
@@ -331,25 +652,25 @@ function pathsForChange(change) {
   return [change.oldPath, change.path].filter(Boolean);
 }
 
-function findAgentRelatedChangeIds(agentPath, manifest) {
-  if (agentPath === 'AGENTS.md') return manifest.map((change) => change.id);
+function findAgentRelatedChangeIds(agentPath, changes, evidenceIdByRawChangeId) {
+  if (agentPath === 'AGENTS.md') return [...new Set(changes.map((change) => evidenceIdByRawChangeId.get(change.id)))];
   const agentDirectory = path.posix.dirname(agentPath);
-  return manifest
+  return [...new Set(changes
     .filter((change) => pathsForChange(change).some((changedPath) => (
       changedPath === agentPath || changedPath.startsWith(`${agentDirectory}/`)
     )))
-    .map((change) => change.id);
+    .map((change) => evidenceIdByRawChangeId.get(change.id)))];
 }
 
-function findWorkSpecRelatedChangeIds(candidate, manifest) {
+function findWorkSpecRelatedChangeIds(candidate, changes, evidenceIdByRawChangeId) {
   const workSpecDirectory = path.posix.dirname(candidate.path);
-  return manifest
+  return [...new Set(changes
     .filter((change) => pathsForChange(change).some((changedPath) => (
       changedPath === candidate.path
       || changedPath.startsWith(`${workSpecDirectory}/`)
       || candidate.content.includes(changedPath)
     )))
-    .map((change) => change.id);
+    .map((change) => evidenceIdByRawChangeId.get(change.id)))];
 }
 
 function addWorkSpecCandidate(candidateMap, candidate) {
@@ -371,7 +692,7 @@ function isSpecificWorkSpecReferencePath(changedPath) {
   ]).has(path.posix.basename(changedPath));
 }
 
-async function findWorkSpecCandidates({ repoRoot, changes, stageMap, env, signal }) {
+async function findWorkSpecCandidates({ repoRoot, changes, referenceChanges = changes, stageMap, env, signal }) {
   const candidates = new Map();
   const directEntryByPath = new Map();
   for (const change of changes) {
@@ -405,7 +726,7 @@ async function findWorkSpecCandidates({ repoRoot, changes, stageMap, env, signal
     }
   }
 
-  const searchPaths = [...new Set(changes
+  const searchPaths = [...new Set(referenceChanges
     .flatMap((change) => [change.oldPath, change.path])
     .filter((changedPath) => changedPath && isSpecificWorkSpecReferencePath(changedPath)))];
   for (let start = 0; start < searchPaths.length; start += 30) {
@@ -424,15 +745,11 @@ async function findWorkSpecCandidates({ repoRoot, changes, stageMap, env, signal
     }
   }
 
-  const requiredCandidates = [...candidates.values()]
+  const allRequiredCandidates = [...candidates.values()]
     .filter((candidate) => candidate.required)
     .sort((left, right) => left.path.localeCompare(right.path));
-  if (requiredCandidates.length > MAX_REQUIRED_WORK_SPECS) {
-    throw new AutomaticCommitError(
-      'TOO_MANY_REQUIRED_WORK_SPECS',
-      `Found ${requiredCandidates.length} directly owned work specs; maximum is ${MAX_REQUIRED_WORK_SPECS}.`,
-    );
-  }
+  const requiredCandidates = allRequiredCandidates.slice(0, MAX_REQUIRED_WORK_SPECS);
+  const omittedRequiredCount = Math.max(0, allRequiredCandidates.length - requiredCandidates.length);
   const optionalCandidates = [...candidates.values()]
     .filter((candidate) => !candidate.required)
     .sort((left, right) => left.path.localeCompare(right.path));
@@ -469,7 +786,7 @@ async function findWorkSpecCandidates({ repoRoot, changes, stageMap, env, signal
     totalBytes += Buffer.byteLength(context.content);
     result.push({ ...candidate, blobSize, ...context });
   }
-  return { candidates: result, omittedSuggestionCount };
+  return { candidates: result, omittedRequiredCount, omittedSuggestionCount };
 }
 
 export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositoryName, snapshot, signal }) {
@@ -477,6 +794,7 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     repoRoot,
     args: ['diff', '--cached', '--raw', '-z', '--no-abbrev', '--find-renames', baseOid, '--'],
     env: snapshot.snapshotEnv,
+    maximumStdoutBytes: MAX_RAW_MANIFEST_BYTES,
     signal,
   });
   const changes = parseRawChanges(rawResult.stdout);
@@ -495,19 +813,17 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
   });
   assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap: snapshot.stageMap, lfsTrackedPaths });
 
-  const manifest = changes.map((change) => {
-    const oldBlobSize = blobSizes.get(change.oldOid) || 0;
-    const blobSize = blobSizes.get(change.newOid) || 0;
-    return {
-      ...change,
-      oldBlobSize,
-      blobSize,
-      metadataOnly: BINARY_FILE_EXTENSION_PATTERN.test(change.path)
-        || (change.oldPath ? BINARY_FILE_EXTENSION_PATTERN.test(change.oldPath) : false)
-        || Math.max(oldBlobSize, blobSize) > 512_000,
-    };
+  // Model context is finite even when a Git snapshot is not. Preserve every raw path through safety and
+  // work-spec discovery, then progressively summarize coherent path cohorts instead of rejecting a large sweep.
+  const evidenceManifest = buildEvidenceManifest({ changes, blobSizes, stageMap: snapshot.stageMap });
+  const { manifest, evidenceIdByRawChangeId } = evidenceManifest;
+  await scanMetadataOnlyBlobsForSecrets({
+    repoRoot,
+    manifest: evidenceManifest.metadataOnlyChanges,
+    blobSizes,
+    env: snapshot.snapshotEnv,
+    signal,
   });
-  await scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, env: snapshot.snapshotEnv, signal });
 
   const patches = await readBoundedPatches({
     repoRoot,
@@ -550,7 +866,7 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     agentContextBytes += Buffer.byteLength(context.content);
     agentContracts.push({
       path: agentPath,
-      relatedChangeIds: findAgentRelatedChangeIds(agentPath, manifest),
+      relatedChangeIds: findAgentRelatedChangeIds(agentPath, changes, evidenceIdByRawChangeId),
       blobSize: agentBlobSizes.get(row.oid) || 0,
       ...context,
     });
@@ -559,16 +875,23 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
   const workSpecDiscovery = await findWorkSpecCandidates({
     repoRoot,
     changes,
+    referenceChanges: manifest,
     stageMap: snapshot.stageMap,
     env: snapshot.snapshotEnv,
     signal,
   });
   const stat = (await runGitCommand({
     repoRoot,
-    args: ['diff', '--cached', '--stat', '--find-renames', baseOid, '--'],
+    args: changes.length > 1_000
+      ? ['diff', '--cached', '--shortstat', '--find-renames', baseOid, '--']
+      : ['diff', '--cached', '--stat', '--find-renames', baseOid, '--'],
     env: snapshot.snapshotEnv,
     signal,
   })).stdout.toString('utf8');
+  const boundedStat = createBoundedExcerpt(stat, MAX_DIFF_STAT_CONTEXT_BYTES, {
+    label: 'git diff --stat',
+    bodyLabel: 'diff stat body',
+  });
   const recentCommits = (await runGitCommand({
     repoRoot,
     args: ['log', '-12', '--format=%h%x09%s%n%b%n---', baseOid],
@@ -579,31 +902,30 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
 
   const workSpecCandidates = workSpecDiscovery.candidates.map((candidate) => ({
     ...candidate,
-    relatedChangeIds: findWorkSpecRelatedChangeIds(candidate, manifest),
+    relatedChangeIds: findWorkSpecRelatedChangeIds(candidate, changes, evidenceIdByRawChangeId),
   }));
   const packet = {
     snapshotId: snapshot.snapshotId,
     baseOid,
     branch,
     repositoryName,
+    rawChangeCount: changes.length,
+    evidenceCompaction: evidenceManifest.summary,
     manifest,
-    diffStat: stat,
+    diffStat: boundedStat,
     patches,
     applicableAgentContracts: agentContracts,
     workSpecCandidates,
     requiredWorkSpecPaths: workSpecCandidates
       .filter((candidate) => candidate.required)
       .map((candidate) => candidate.path),
-    workSpecDiscovery: { omittedSuggestionCount: workSpecDiscovery.omittedSuggestionCount },
+    workSpecDiscovery: {
+      omittedRequiredCount: workSpecDiscovery.omittedRequiredCount,
+      omittedSuggestionCount: workSpecDiscovery.omittedSuggestionCount,
+    },
     recentCommits,
   };
   const serialized = JSON.stringify(packet);
-  if (Buffer.byteLength(serialized) > MAX_PACKET_BYTES) {
-    throw new AutomaticCommitError(
-      'MODEL_PACKET_LIMIT',
-      `The complete evidence packet is ${Buffer.byteLength(serialized)} bytes; maximum is ${MAX_PACKET_BYTES}.`,
-    );
-  }
   const packetSecretViolation = findSecretViolation(`+${serialized.replaceAll('\n', '\n+')}`);
   if (packetSecretViolation) {
     throw new AutomaticCommitError(

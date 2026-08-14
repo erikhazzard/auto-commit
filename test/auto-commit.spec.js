@@ -223,11 +223,7 @@ if (model === 'gpt-5.6-luna') {
       }],
       scope: ['Runtime, interaction, and external-system behavior were not exercised by the staged evidence.'],
       workSpecs: packet.workSpecCandidates
-        .filter((candidate) => changes.some((change) => (
-          candidate.relationshipHint === 'touched'
-            ? change.path === candidate.path
-            : change.path.startsWith(path.posix.dirname(candidate.path) + '/') || candidate.content.includes(change.path)
-        )))
+        .filter((candidate) => changes.some((change) => candidate.relatedChangeIds.includes(change.id)))
         .map((candidate) => ({
           path: candidate.path,
           relationship: candidate.relationshipHint,
@@ -1068,6 +1064,105 @@ describe.sequential('automatic commit core flow', () => {
       reasoningOutputTokens: 900,
       totalTokens: 7_000,
     });
+  });
+
+  it('commits a retired subtree above the raw change ceiling without exposing lockfile bodies', async () => {
+    const repoRoot = await createRepository();
+    await Promise.all(Array.from({ length: 501 }, (_, index) => writeRepoFile(
+      repoRoot,
+      `retired/creator-lab/source-${String(index).padStart(3, '0')}.js`,
+      `export const retiredSource${index} = true;\n`,
+    )));
+    await writeRepoFile(repoRoot, 'retired/keep.js', 'export const retainedSource = true;\n');
+    await writeRepoFile(repoRoot, 'package-lock.json', '{"lockfileVersion":3,"packages":{}}\n');
+    await git(repoRoot, ['add', '-A']);
+    await git(repoRoot, ['commit', '-m', 'Add retired creator lab']);
+
+    await fs.rm(path.join(repoRoot, 'retired', 'creator-lab'), { recursive: true });
+    const lockfileMarker = 'LOCKFILE_BODY_MUST_STAY_OUT_OF_MODEL_CONTEXT';
+    await writeRepoFile(
+      repoRoot,
+      'package-lock.json',
+      `{"lockfileVersion":3,"packages":{"marker":"${lockfileMarker}"}}\n`,
+    );
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    process.env.FAKE_CODEX_LOG = logPath;
+    const progressEvents = [];
+
+    const result = await runAutomaticCommitOnce({
+      repoRoot,
+      codexBin,
+      log: (_message, event) => progressEvents.push(event),
+    });
+
+    expect(result.status).toBe('committed');
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    const shardPackets = lunaCalls.map((call) => parsePromptEnvelope(call.prompt, 'snapshot_packet'));
+    expect(shardPackets[0].rawChangeCount).toBe(502);
+    const overview = shardPackets[0].manifestOverview;
+    expect(overview).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'deleted_path_group',
+        path: 'retired/creator-lab',
+        entryCount: 501,
+        metadataOnly: true,
+      }),
+      expect.objectContaining({
+        path: 'package-lock.json',
+        evidenceDisposition: 'dependency-lockfile',
+        metadataOnly: true,
+      }),
+    ]));
+    expect(calls.every((call) => !call.prompt.includes(lockfileMarker))).toBe(true);
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'EVIDENCE',
+      state: 'success',
+      detail: expect.stringContaining('502 Git changes → 2 evidence entries'),
+    }));
+    expect((await git(repoRoot, ['ls-tree', '-r', '--name-only', 'HEAD'])).split('\n'))
+      .not.toContain('retired/creator-lab/source-000.js');
+    expect(await git(repoRoot, ['show', 'HEAD:package-lock.json'])).toContain(lockfileMarker);
+  });
+
+  it('adaptively summarizes a high-cardinality source sweep instead of rejecting it', async () => {
+    const repoRoot = await createRepository();
+    await Promise.all(Array.from({ length: 501 }, (_, index) => writeRepoFile(
+      repoRoot,
+      `src/large-sweep/module-${String(index).padStart(3, '0')}.js`,
+      `export const sweepValue${index} = 'before';\n`,
+    )));
+    await git(repoRoot, ['add', '-A']);
+    await git(repoRoot, ['commit', '-m', 'Add large source sweep']);
+    await Promise.all(Array.from({ length: 501 }, (_, index) => writeRepoFile(
+      repoRoot,
+      `src/large-sweep/module-${String(index).padStart(3, '0')}.js`,
+      `export const sweepValue${index} = 'after';\n`,
+    )));
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    process.env.FAKE_CODEX_LOG = logPath;
+
+    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+
+    expect(result.status).toBe('committed');
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    const shardPacket = parsePromptEnvelope(lunaCalls[0].prompt, 'snapshot_packet');
+    expect(shardPacket.rawChangeCount).toBe(501);
+    expect(shardPacket.manifestOverview).toEqual([
+      expect.objectContaining({
+        kind: 'changed_path_group',
+        path: 'src/large-sweep',
+        entryCount: 501,
+        metadataOnly: true,
+        evidenceDisposition: 'adaptive-path-summary',
+      }),
+    ]);
+    expect(lunaCalls.every((call) => call.prompt.length < 1_048_576)).toBe(true);
+    expect(await git(repoRoot, ['show', 'HEAD:src/large-sweep/module-500.js']))
+      .toBe("export const sweepValue500 = 'after';\n");
   });
 
   it('cancels sibling Luna processes and never calls Sol when one shard fails', async () => {
