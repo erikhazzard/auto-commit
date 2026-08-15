@@ -16,20 +16,20 @@ This file owns adaptive engineering detail only. The work spec owns product comm
 1. Resolve the canonical repository root with `git rev-parse --show-toplevel` before snapshot construction.
 2. Derive one bounded repository name from the root basename. Reject unusable names instead of accepting model-supplied identity.
 3. Include the repository name as trusted runtime context for terminal presentation and deterministic message rendering, not as changed-text/model evidence.
-4. Luna and Sol continue selecting only candidate work-spec paths relative to the repository root. The renderer alone prefixes validated paths as `Work-Spec: <repository>/<path>`.
+4. The Luna evidence pass and final writer select only candidate work-spec paths relative to the repository root. The renderer alone prefixes validated paths as `Work-Spec: <repository>/<path>`.
 5. Tests use a fixture repository whose basename is not `idavoll-games` and assert that hardcoded branding cannot leak into the resulting commit.
 
 ## Extraction-preserved runtime flow
 
-The implementation retains the existing settled-state polling, frozen copied index, secret/context bounds, Luna xhigh → Sol high structured handoff, deterministic compact renderer, pre-commit drift checks, commit-index isolation, post-commit reconciliation, signal cleanup, TTY phase rail, `NO_COLOR`, and redirected plain output. Parallel Luna changes evidence ownership and timing, not those safety contracts.
+The implementation retains the existing settled-state polling, frozen copied index, secret/context bounds, Luna xhigh evidence → Luna max writing structured handoff, deterministic compact renderer, pre-commit drift checks, commit-index isolation, post-commit reconciliation, signal cleanup, TTY phase rail, `NO_COLOR`, and redirected plain output. Luna max receives one bounded repair; only two repairable invalid messages unlock one Sol high fallback. Parallel Luna changes evidence ownership and timing, not those safety contracts.
 
 ## Parallel Luna evidence flow
 
 1. Read and safety-check every raw change from the frozen index, then map it deterministically into the evidence manifest. Keep ordinary changes one-to-one while the bounded manifest permits; collapse a complete removed directory subtree of at least 20 files first, then progressively collapse coherent path cohorts whenever entry or serialized-byte pressure remains. Each summary retains status counts, boundary samples, file types, aggregate sizes, and a deterministic path/status digest. Keep recognized dependency lockfiles metadata-only, and batch-scan every omitted staged blob for secret signatures. Work-spec discovery and agent ownership continue to use raw paths before mapping relationships to final evidence IDs.
 2. Keep a compact full-evidence-manifest overview in every shard so paths reveal cross-file relationships, but assign each evidence unit's detailed patch and required context to exactly one shard. Choose one shard for small deltas and at most four for non-trivial deltas; greedily balance bounded evidence bytes rather than raw file count.
 3. Start every Luna shard concurrently with unique schema/output paths and a shared abort controller linked to the caller signal. Terminal events use `LUNA 1/N` labels; redirected logs retain full timestamped text.
-4. Validate each result against only its assigned manifest, deterministically replace model-chosen stream IDs with globally unique shard/stream IDs, concatenate results, then run the existing Luna validator again against the complete packet. Sol sees only this fully validated merged report.
-5. On the first shard failure, abort siblings and wait for all child termination before surfacing the original failure. No correction retry or partial report crosses into Sol.
+4. Validate each result against only its assigned manifest, deterministically replace model-chosen stream IDs with globally unique shard/stream IDs, concatenate results, then run the existing Luna validator again against the complete packet. The Luna max writer—and the rare Sol fallback—see only this fully validated merged report.
+5. On the first shard failure, abort siblings and wait for all child termination before surfacing the original failure. No correction retry or partial report crosses into final writing.
 6. Preserve a single-Luna path only as the natural result of a one-shard partition, not as a separate implementation or flag.
 
 ## macOS personal automation

@@ -5,6 +5,7 @@
 - 2026-08-13 — Erik requested a repository-owned automatic commit workflow using Luna for complete change accounting and Sol for the final message.
 - 2026-08-14 — Erik required timestamped liveness, lower latency, a compact value-first message, and a much stronger terminal visual treatment.
 - 2026-08-14 — Erik requested that the finished tool become a standalone repository at `git@github.com:erikhazzard/auto-commit.git`, be installed as a development dependency in the named repositories, and be run in each.
+- 2026-08-15 — After a same-evidence A/B comparison, Erik selected Luna max as the default final writer and asked that journeys and engineering unlocks explain impact in product-manager language.
 
 ## Surviving rationale
 
