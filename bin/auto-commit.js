@@ -73,6 +73,8 @@ const MESSAGE_WORKSTREAMS_MAX_CHARACTERS = 240;
 const MESSAGE_PROOF_MAX_CHARACTERS = 320;
 const MESSAGE_SCOPE_MAX_CHARACTERS = 280;
 const MAXIMUM_LUNA_WORKSTREAMS = 50;
+const CODEX_FAILURE_DETAIL_MAX_CHARACTERS = 2_000;
+const CODEX_STRUCTURED_FAILURE_MAX_CHARACTERS = 1_200;
 const LUNA_VALUE_CANDIDATE_KINDS = Object.freeze([
   'user_journey',
   'developer_journey',
@@ -334,8 +336,39 @@ function combineCodexTokenUsage(usages) {
   };
 }
 
+function normalizeCodexFailureField(value, maximumCharacters = CODEX_STRUCTURED_FAILURE_MAX_CHARACTERS) {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (!normalized) return null;
+  if (normalized.length <= maximumCharacters) return normalized;
+  return `${normalized.slice(0, maximumCharacters - 1)}…`;
+}
+
+function readCodexFailureEventDetail(event) {
+  if (event?.type !== 'error' && event?.type !== 'turn.failed') return null;
+  const nestedError = event.error;
+  const message = normalizeCodexFailureField(
+    event.message
+      ?? (typeof nestedError === 'string' ? nestedError : nestedError?.message),
+  );
+  const code = normalizeCodexFailureField(
+    event.code
+      ?? (typeof nestedError === 'object'
+        ? nestedError?.code ?? nestedError?.type ?? nestedError?.codex_error_info
+        : null),
+    120,
+  );
+  if (!message) return code ? `Codex error (${code})` : null;
+  return code && !message.includes(code) ? `${message} (${code})` : message;
+}
+
 function parseCodexJsonLines(stdout) {
   let finalMessage = null;
+  let latestErrorDetail = null;
+  let latestTurnFailureDetail = null;
   const usages = [];
   for (const line of stdout.toString('utf8').split(/\r?\n/u).filter(Boolean)) {
     let event;
@@ -347,6 +380,10 @@ function parseCodexJsonLines(stdout) {
     if (event?.type === 'turn.completed') {
       usages.push(normalizeCodexTokenUsage(event.usage));
     }
+    // Never fall back to rendering a raw JSON event: Codex events can carry request context and staged prompt data.
+    const failureDetail = readCodexFailureEventDetail(event);
+    if (failureDetail && event.type === 'turn.failed') latestTurnFailureDetail = failureDetail;
+    else if (failureDetail) latestErrorDetail = failureDetail;
     if (
       event?.type === 'item.completed'
       && event.item?.type === 'agent_message'
@@ -356,9 +393,22 @@ function parseCodexJsonLines(stdout) {
     }
   }
   return {
+    failureDetail: latestTurnFailureDetail || latestErrorDetail,
     finalMessage,
     tokenUsage: combineCodexTokenUsage(usages),
   };
+}
+
+function formatCodexProcessFailure({ stderr, structuredFailureDetail, exitCode }) {
+  const stderrLines = stderr.toString('utf8').trim().split(/\r?\n/u).filter(Boolean);
+  // Codex schema/API failures are multi-line diagnostics whose final line is often only `}`.
+  // Preserve the bounded tail so operators can act on the real rejection instead of a useless delimiter.
+  const stderrDetail = stderrLines.slice(-20).join('\n').slice(-CODEX_FAILURE_DETAIL_MAX_CHARACTERS);
+  if (!stderrDetail) return structuredFailureDetail || `exit ${exitCode}`;
+  if (!structuredFailureDetail || stderrDetail.includes(structuredFailureDetail)) return stderrDetail;
+  const remainingCharacters = CODEX_FAILURE_DETAIL_MAX_CHARACTERS - stderrDetail.length - 1;
+  if (remainingCharacters <= 0) return stderrDetail;
+  return `${stderrDetail}\n${structuredFailureDetail.slice(0, remainingCharacters)}`;
 }
 
 function formatTokenUsageDetail(usage) {
@@ -687,6 +737,7 @@ export function formatAutomaticCommitHelp() {
     `Progress is timestamped on stderr; interactive terminals get styled phase output, ${MODEL_HEARTBEAT_MS / 1_000}s model heartbeats, and exact token usage after each model call.`,
     `Completed model calls, including repair attempts, count toward the API-equivalent USD estimate using standard rates dated ${API_PRICING_AS_OF}; actual Codex billing may differ.`,
     'Set NO_COLOR=1 to disable color. Redirected output remains plain.',
+    'Set AUTO_COMMIT_CODEX_HOME=<path> to use a tool-only cached Codex profile; OPENAI_API_KEY is never forwarded.',
     'This command stages and commits every settled change in the current repository.',
     'Non-trivial snapshots use up to four parallel Luna evidence calls before one Luna max writing pass.',
     'If Luna max exhausts its bounded message repair, one Sol high fallback attempt preserves reliability.',
@@ -1070,7 +1121,8 @@ function buildCodexEnvironment(repoRoot) {
   const environment = {
     ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('FAKE_CODEX_'))),
     PATH: process.env.PATH,
-    CODEX_HOME: process.env.CODEX_HOME,
+    // Keep automation auth independent from an enclosing Codex/Ratatosk session when explicitly configured.
+    CODEX_HOME: process.env.AUTO_COMMIT_CODEX_HOME || process.env.CODEX_HOME,
     HOME: process.env.HOME,
     TMPDIR: process.env.TMPDIR,
     LANG: process.env.LANG,
@@ -1156,10 +1208,11 @@ async function invokeCodex({
     const codexEvents = parseCodexJsonLines(result.stdout);
     tokenUsage = codexEvents.tokenUsage;
     if (result.code !== 0) {
-      const stderrLines = result.stderr.toString('utf8').trim().split(/\r?\n/u).filter(Boolean);
-      // Codex schema/API failures are multi-line diagnostics whose final line is often only `}`.
-      // Preserve the bounded tail so operators can act on the real rejection instead of a useless delimiter.
-      const failureDetail = (stderrLines.slice(-20).join('\n') || `exit ${result.code}`).slice(-2_000);
+      const failureDetail = formatCodexProcessFailure({
+        stderr: result.stderr,
+        structuredFailureDetail: codexEvents.failureDetail,
+        exitCode: result.code,
+      });
       throw new AutomaticCommitError(
         'CODEX_FAILED',
         `${model} failed: ${failureDetail}`,

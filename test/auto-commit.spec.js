@@ -43,6 +43,7 @@ const temporaryDirectories = new Set();
 const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_LOG',
   'FAKE_CODEX_EXIT_EARLY',
+  'FAKE_CODEX_JSON_FAILURE',
   'FAKE_CODEX_EXPECTED_LUNA_SHARDS',
   'FAKE_CODEX_DUPLICATE_VALUE_KIND',
   'FAKE_CODEX_FAIL_LUNA_SHARD',
@@ -119,6 +120,22 @@ const role = prompt.includes('<snapshot_packet>')
   : prompt.includes('<validated_luna_report>')
     ? 'writer'
     : 'unknown';
+if (process.env.FAKE_CODEX_JSON_FAILURE && model === 'gpt-5.6-luna') {
+  process.stdout.write(JSON.stringify({
+    type: 'error',
+    message: 'Retrying after a transient transport failure.',
+    requestPrompt: prompt,
+  }) + '\\n');
+  process.stdout.write(JSON.stringify({
+    type: 'turn.failed',
+    error: {
+      message: 'Usage limit reached for this account. Try again later.',
+      code: 'usage_limit',
+    },
+    requestPrompt: prompt,
+  }) + '\\n');
+  process.exit(1);
+}
 const outputPath = args[args.indexOf('--output-last-message') + 1];
 const outputSchemaPath = args[args.indexOf('--output-schema') + 1];
 const outputSchema = JSON.parse(fs.readFileSync(outputSchemaPath, 'utf8'));
@@ -142,6 +159,8 @@ if (logPath) {
     args,
     prompt,
     cwd: process.cwd(),
+    codexHome: process.env.CODEX_HOME,
+    hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
     inheritedPwd: process.env.PWD,
     hasGitIndexFile: Boolean(process.env.GIT_INDEX_FILE),
     jsonOutput: args.includes('--json'),
@@ -427,6 +446,8 @@ describe.sequential('automatic commit core flow', () => {
     ));
     expect(help.stdout).toContain('auto-commit --watch');
     expect(help.stdout).toContain('stages and commits every settled change');
+    expect(help.stdout).toContain('AUTO_COMMIT_CODEX_HOME=<path>');
+    expect(help.stdout).toContain('OPENAI_API_KEY is never forwarded');
     expect(gcmHelp.stdout).toBe(help.stdout);
     expect(installedManifest.bin).toEqual({
       'auto-commit': 'bin/auto-commit.js',
@@ -941,6 +962,62 @@ describe.sequential('automatic commit core flow', () => {
     ]);
   });
 
+  it('inherits the caller Codex home without forwarding its API key', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    const callerCodexHome = path.join(repoRoot, '.git', 'caller-codex-home');
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const inheritedAuth = true;\n');
+    const childEnvironment = {
+      ...process.env,
+      FAKE_CODEX_LOG: logPath,
+      CODEX_HOME: callerCodexHome,
+      OPENAI_API_KEY: 'must-not-cross-the-model-boundary',
+    };
+    delete childEnvironment.AUTO_COMMIT_CODEX_HOME;
+
+    await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 8 * 1024 * 1024,
+      env: childEnvironment,
+    });
+
+    const calls = await readFakeCalls(logPath);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.codexHome === callerCodexHome)).toBe(true);
+    expect(calls.every((call) => call.hasOpenAiApiKey === false)).toBe(true);
+  });
+
+  it('uses a dedicated auto-commit Codex home without forwarding the API key', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    const callerCodexHome = path.join(repoRoot, '.git', 'caller-codex-home');
+    const automaticCommitCodexHome = path.join(repoRoot, '.git', 'auto-commit-codex-home');
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const dedicatedAuth = true;\n');
+
+    await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 8 * 1024 * 1024,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        CODEX_HOME: callerCodexHome,
+        AUTO_COMMIT_CODEX_HOME: automaticCommitCodexHome,
+        OPENAI_API_KEY: 'must-not-cross-the-model-boundary',
+      },
+    });
+
+    const calls = await readFakeCalls(logPath);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.codexHome === automaticCommitCodexHome)).toBe(true);
+    expect(calls.every((call) => call.hasOpenAiApiKey === false)).toBe(true);
+  });
+
   it('reports an early Codex rejection instead of masking it as EPIPE', async () => {
     const repoRoot = await createRepository();
     const codexBin = await createFakeCodex(repoRoot);
@@ -964,6 +1041,35 @@ describe.sequential('automatic commit core flow', () => {
     expect(failure?.stderr).not.toContain('PROCESS_STDIN_FAILED');
     expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
     expect(await git(repoRoot, ['diff', '--cached', '--name-only'])).toBe('generated/large-context.txt\n');
+  });
+
+  it('reports a structured Codex failure from stdout without echoing the prompt', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const privatePromptMarker = 'PRIVATE_STAGED_PROMPT_MARKER';
+    await writeRepoFile(repoRoot, 'src/creator.js', `export const marker = '${privatePromptMarker}';\n`);
+
+    let failure;
+    try {
+      await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 10_000,
+        maxBuffer: 8 * 1024 * 1024,
+        env: { ...process.env, FAKE_CODEX_JSON_FAILURE: '1' },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.code).toBe(1);
+    expect(failure?.stderr).toContain(
+      'CODEX_FAILED: gpt-5.6-luna failed: Usage limit reached for this account. Try again later. (usage_limit)',
+    );
+    expect(failure?.stderr).not.toContain('Retrying after a transient transport failure.');
+    expect(failure?.stderr).not.toContain(privatePromptMarker);
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
+    expect(await git(repoRoot, ['diff', '--cached', '--name-only'])).toBe('src/creator.js\n');
   });
 
   it('keeps watch mode alive, commits a settled delta, and releases its lock on SIGTERM', async () => {

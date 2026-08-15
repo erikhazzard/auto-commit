@@ -21,7 +21,7 @@ This file owns adaptive engineering detail only. The work spec owns product comm
 
 ## Extraction-preserved runtime flow
 
-The implementation retains the existing settled-state polling, frozen copied index, secret/context bounds, Luna xhigh evidence → Luna max writing structured handoff, deterministic compact renderer, pre-commit drift checks, commit-index isolation, post-commit reconciliation, signal cleanup, TTY phase rail, `NO_COLOR`, and redirected plain output. Luna max receives one bounded repair; only two repairable invalid messages unlock one Sol high fallback. Parallel Luna changes evidence ownership and timing, not those safety contracts.
+The implementation retains the existing settled-state polling, frozen copied index, secret/context bounds, Luna xhigh evidence → Luna max writing structured handoff, deterministic compact renderer, pre-commit drift checks, commit-index isolation, post-commit reconciliation, signal cleanup, TTY phase rail, `NO_COLOR`, and redirected plain output. Luna max receives one bounded repair; only two repairable invalid messages unlock one Sol high fallback. Parallel Luna changes evidence ownership and timing, not those safety contracts. `AUTO_COMMIT_CODEX_HOME` optionally selects a tool-only cached auth profile; the child environment never receives `OPENAI_API_KEY`.
 
 ## Parallel Luna evidence flow
 
@@ -37,7 +37,7 @@ The implementation retains the existing settled-state polling, frozen copied ind
 1. Install the package globally from the exact pushed Git SHA. The package remains the only Git/model implementation.
 2. Expose `gcm` through the package's `bin` map. Do not add a shell alias or prepend a second `git add -A`; both global command names reach the same one-shot CLI, which stages and freezes once under its own authority.
 3. Install `~/.local/bin/auto-commit-idavoll-repositories`, a small user-owned scheduler adapter with four explicit canonical repository paths. It checks `git status --porcelain=v1 --untracked-files=all`; clean output returns without invoking `auto-commit`, while dirty repositories run sequentially through the absolute global binary.
-4. Install `~/Library/LaunchAgents/com.erikhazzard.auto-commit.plist` with `StartInterval=600`, an explicit launchd-safe PATH/CODEX environment, no `RunAtLoad`, and stdout/stderr under `~/Library/Logs/auto-commit/`.
+4. Install `~/Library/LaunchAgents/com.erikhazzard.auto-commit.plist` with `StartInterval=600`, an explicit launchd-safe PATH/auth-profile environment, no `RunAtLoad`, and stdout/stderr under `~/Library/Logs/auto-commit/`. When a dedicated profile is selected, pass only `AUTO_COMMIT_CODEX_HOME`; never place the API key in the plist.
 5. Load with `launchctl bootstrap gui/<uid> ...`; inspect via `launchctl print`. The job itself never pushes and per-repository locks remain the overlap authority.
 6. Prove the adapter with temporary clean/dirty repositories and a recording fake binary before loading it against real repositories. A clean fixture must produce zero recorded invocations; a dirty fixture exactly one.
 
@@ -46,7 +46,7 @@ The implementation retains the existing settled-state polling, frozen copied ind
 - Pack/install failure: no consumer migration or live run is claimed.
 - Invalid repository identity: fail before model invocation or commit.
 - Consumer cannot resolve the pinned Git package: preserve its working tree, report the install failure, and do not fall back to a local script.
-- Live run fails before commit: keep staged work and the dependency migration intact for diagnosis or retry.
+- Live run fails before commit: keep staged work and the dependency migration intact for diagnosis or retry. Prefer a bounded known structured Codex failure message/code from stdout when stderr is empty; never render an entire event because it may contain staged prompt context.
 - Live run reports ambiguity: inspect Git parent/tree/message; never repeat a possibly successful commit blindly.
 
 ## Proof seam

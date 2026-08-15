@@ -13,6 +13,30 @@
 
 The CLI has no third-party runtime dependencies.
 
+## Choose Codex authentication
+
+By default, `auto-commit` uses the caller's existing `CODEX_HOME`. Confirm that profile before a run:
+
+```bash
+codex login status
+```
+
+For unattended runs, a dedicated API-key profile avoids coupling `gcm` to Ratatosk or another interactive Codex account. The login is a one-time setup; API usage is billed at standard API rates:
+
+```bash
+(
+  set -e
+  umask 077
+  mkdir "$HOME/.codex-auto-commit"
+  printf '%s\n' 'cli_auth_credentials_store = "file"' > "$HOME/.codex-auto-commit/config.toml"
+  printenv OPENAI_API_KEY | CODEX_HOME="$HOME/.codex-auto-commit" codex login --with-api-key
+  CODEX_HOME="$HOME/.codex-auto-commit" codex login status
+)
+export AUTO_COMMIT_CODEX_HOME="$HOME/.codex-auto-commit"
+```
+
+The setup intentionally stops if that profile directory already exists rather than overwriting it. Add only the final `export` to `.zshrc` to keep this choice across interactive shells. `AUTO_COMMIT_CODEX_HOME` affects only Codex subprocesses started by `auto-commit` and takes precedence over an inherited `CODEX_HOME`; it is not a secret. The API key is read only by the one-time login command and is then cached under the dedicated directory, so protect that directory like any other credential store. Do not put `OPENAI_API_KEY` or the cached `auth.json` in a repository, wrapper, or LaunchAgent plist. A LaunchAgent does not source `.zshrc`, so pass `AUTO_COMMIT_CODEX_HOME` in its environment separately when it should use the same profile.
+
 ## Install globally as `gcm`
 
 Install the current Git revision once to make `gcm` available in any repository and shell:
@@ -28,7 +52,7 @@ Then run a sweep from any Git repository:
 gcm
 ```
 
-`gcm` is a real package command, not a shell alias, so `.zshrc` changes are unnecessary. It is equivalent to `auto-commit --once`: both commands stage, freeze, and commit the complete settled delta. Rerun the install command to upgrade. To pin a specific revision, append `#FULL_COMMIT_SHA` to the Git URL.
+`gcm` is a real package command, not a shell alias, so no alias is required in `.zshrc`; the optional authentication-profile export above is the only shell configuration. It is equivalent to `auto-commit --once`: both commands stage, freeze, and commit the complete settled delta. Rerun the install command to upgrade. To pin a specific revision, append `#FULL_COMMIT_SHA` to the Git URL.
 
 ## Install in a repository
 
@@ -97,7 +121,7 @@ Proof language is deliberately conservative. A changed test file proves that tes
 
 The tool freezes a copied Git index, gives every model call bounded evidence from that snapshot, checks that live `HEAD` and the real index have not moved, commits through an isolated index, and reconciles the resulting commit before reporting success. Edits made after the snapshot remain for a later sweep.
 
-Failures return nonzero and preserve repository work. A permanent validation failure in watch mode blocks that unchanged fingerprint; a changed delta re-arms the watcher. The tool never pushes, rebases, amends, resets, restores, cleans, or deletes work.
+Failures return nonzero and preserve repository work. Known structured Codex failures—such as a usage limit—surface their bounded provider message without echoing the staged prompt; stderr diagnostics remain authoritative when present. A permanent validation failure in watch mode blocks that unchanged fingerprint; a changed delta re-arms the watcher. The tool never pushes, rebases, amends, resets, restores, cleans, or deletes work.
 
 Use `--codex-bin <path>` when the first compatible standalone Codex CLI on `PATH` is not the desired executable. Run `auto-commit --help` for timing and watch options.
 

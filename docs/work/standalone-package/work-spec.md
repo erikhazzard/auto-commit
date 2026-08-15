@@ -33,6 +33,7 @@
 - **Assumption:** A Git dependency can move unless pinned. → **Implication:** consumers record an exact commit SHA, not a branch name.
 - **Assumption:** Parallel agents may finish or fail out of order. → **Implication:** shard ownership is deterministic, results are re-keyed and merged by the runtime, and one failure cancels sibling model processes before final writing can run.
 - **Assumption:** A background scheduler should be invisible when there is nothing to do. → **Implication:** a repository dirtiness check happens before `auto-commit` is invoked, logs live outside repositories, and repositories run sequentially.
+- **Assumption:** An interactive Codex host and unattended commit automation may need different billing/authentication. → **Implication:** one explicit tool-scoped Codex home may override the caller profile; credentials and automatic account rotation stay outside the package.
 
 ### 1.D Developer experience bar
 - One canonical command and one canonical implementation.
@@ -41,6 +42,7 @@
 - Interactive stderr remains designed for humans; redirected stderr remains plain and stdout remains the final machine-readable commit result.
 - Parallel progress names each shard and retains time-based liveness without turning redirected output into a dashboard.
 - `gcm` has no hidden mode: it means the documented one-shot all-changes sweep.
+- Authentication choice is inspectable and explicit; selecting a dedicated profile never mutates the enclosing Ratatosk/Codex account or forwards a raw API key into model subprocesses.
 - Commit value fields read as product impact: actor or affected system → changed ability or workflow → why the consequence matters. Spec-, plan-, documentation-, and test-only evidence never masquerades as shipped behavior.
 
 ## 2) Non-Goals
@@ -50,6 +52,7 @@
 - Supporting repositories that are not Git worktrees or runtimes older than the declared Node engine.
 - Linux/systemd scheduling, cloud automation, automatic push, or installing a scheduler for repositories outside the four canonical local Idavoll checkouts.
 - Running scheduled repositories concurrently; sequential execution avoids multiplying Codex load and each repository lock remains authoritative.
+- Rotating through Ratatosk accounts or silently switching from included ChatGPT usage to paid API billing after a failure.
 
 ## 3) Request Anchor
 
@@ -59,6 +62,7 @@
 - **Must:** Split Luna across multiple parallel agents, each receiving a different slice of the frozen changes, without weakening complete accounting.
 - **Must:** Install a global `gcm` alias in `~/.zshrc` so typing it stages and runs the tool through the canonical one-shot path.
 - **Must:** Install a macOS background job that checks the Idavoll repositories every ten minutes, runs the tool only for dirty repositories, and does nothing for clean repositories.
+- **Must:** Make an API-key-authenticated automation profile possible without coupling `gcm` to Ratatosk or placing the raw key in the package, shell command, or LaunchAgent.
 - **Interpretation:** The request names the current `idavoll-games` repository twice; until corrected, the two distinct named consumers are `idavoll-games` and `idavoll-game-platform-backend`.
 
 ## 4) Current Truth
@@ -70,6 +74,7 @@
 - **Fact:** Fresh 0.2.0 consumer runs committed the backend at `e34d7fb64323` and `idavoll-games` at `bbe7476b7767`; edits arriving after the game snapshot remained staged for the scheduler's next pass.
 - **Fact:** Luna is the dominant latency: 15 backend changes took 2m19s in Luna plus 25s in Sol; 40 game changes took 3m44s in Luna plus 29s in Sol.
 - **Fact:** A same-evidence replay of a real 14-file game commit produced a schema-valid Luna max message that two blind reviews narrowly preferred to Sol high; the final-writing API-equivalent estimate was about 93% lower (`$0.0091` versus `$0.1286`) while the common docs-only overstatement exposed the prompt-honesty requirement.
+- **Fact:** The 2026-08-15 escaped 66-change run launched four approximately 155 KiB Luna shards and surfaced only `exit 1`; the old CLI did not preserve known structured failure events from stdout, so any provider reason there was unavailable. The same ChatGPT-authenticated profile subsequently completed one and four concurrent small Luna calls, ruling out a blanket login, model-access, or concurrency failure but not a size-weighted subscription limit.
 - **Fact:** The package is Node ESM with no third-party runtime dependencies; the 0.2.1 release has a 36-case temporary-repository journey suite.
 - **Decision:** The package name is `@erikhazzard/auto-commit`, the binary name is `auto-commit`, and consumers pin an exact upstream commit SHA through `git+ssh`.
 - **Decision:** The package supports Node `^20.19.0 || ^22.12.0 || >=24.0.0`, covering the source repository and the backend's Node 24 runtime.
@@ -85,10 +90,11 @@
 - `[C-007 | Failure]` Package or consumer installation failure leaves repository work intact and returns nonzero; a runtime failure never reports a commit unless Git reconciliation proves it exists.
 - `[C-008 | Must Not]` Extraction may not weaken snapshot integrity, prompt-injection resistance, secret rejection, proof honesty, or the concise message shape.
 - `[C-009 | Must]` A snapshot with enough evidence entries is partitioned into at most four disjoint, size-balanced Luna packets. Every raw Git change maps deterministically to one evidence ID; complete removed directories use digest-backed group IDs, dependency lockfiles remain committed but metadata-only, and any still-oversized evidence manifest progressively compacts coherent path cohorts instead of rejecting a file-count or model-packet ceiling. Every resulting evidence ID appears in exactly one shard, each shard receives only its assigned patch detail plus relevant bounded context, and the merged report is validated once more against the full evidence manifest before final writing runs.
-- `[C-010 | Failure]` If any Luna evidence shard fails, times out, returns invalid coverage, or is interrupted, sibling shard processes are cancelled, no final writer is invoked, no commit is reported, and the frozen/staged work remains recoverable for the operator or next scheduled check.
+- `[C-010 | Failure]` If any Luna evidence shard fails, times out, returns invalid coverage, or is interrupted, sibling shard processes are cancelled, no final writer is invoked, no commit is reported, and the frozen/staged work remains recoverable for the operator or next scheduled check. A known structured Codex failure surfaces its bounded message/code without rendering unrelated JSON fields or staged prompt data; stderr remains authoritative when present.
 - `[C-011 | Must]` The installed `gcm` package binary resolves to the globally installed, full-SHA package and invokes the same one-shot entrypoint as `auto-commit`; the tool itself remains the sole staging owner so global and npm entrypoints share identical snapshot semantics.
 - `[C-012 | Must]` LaunchAgent `com.erikhazzard.auto-commit` runs at a 600-second interval over `idavoll-games`, `idavoll-game-platform-backend`, `idavoll-frontend`, and `idavoll-studio-frontend`; it tests Git dirtiness before invocation, runs dirty repositories sequentially through the absolute global binary, emits bounded user-library logs, and relies on the per-repository lock to reject overlap.
 - `[C-013 | Must]` Luna max is the normal final writer and receives one bounded semantic/JSON repair. Only two repairable invalid Luna messages invoke one Sol high fallback; service or invocation failures stop directly. The writer prioritizes the highest-impact implemented outcome and expresses journeys/unlocks as actor, changed capability, and consequence for a product reader without presenting spec-, plan-, documentation-, or test-only intent as shipped behavior.
+- `[C-014 | Must]` `AUTO_COMMIT_CODEX_HOME`, when set, becomes the `CODEX_HOME` only for Codex processes started by the tool; otherwise the caller's existing `CODEX_HOME` is preserved. `OPENAI_API_KEY` is never forwarded. Dedicated API authentication is a one-time explicit login and never an automatic paid fallback or Ratatosk-account rotation.
 
 ## 6) Vertical-Slice Ladder to vFinal
 
@@ -113,11 +119,11 @@
 
 ## 7) Current Motion
 
-- **Lane state:** Complete through the 2026-08-15 Luna max writer and impact-first message refinement.
+- **Lane state:** Maintenance candidate in progress after the 2026-08-15 Luna max release: preserve the provider's structured failure reason and add an explicit standalone auth-profile seam.
 - **Approval:** Erik's 2026-08-14 requests authorize the standalone push and consumer runs, then bounded parallel Luna extraction, global `gcm`, and a ten-minute local macOS job over the Idavoll repositories.
 - **Active rung:** `STANDALONE-AUTO-COMMIT__M2` complete.
-- **Next action:** None inside this lane; the loaded scheduler owns later dirty-repository sweeps and operators inspect its stable log paths when a run fails.
-- **Claim boundary:** Exact orchestration, schema-bound identity/value requirements, Luna max default routing, bounded Sol fallback, cancellation, installation, shell resolution, dirty gating, sequential launchd execution, and successful commit reporting are proven. Prompt checks and the real A/B establish the intended impact framing, but Codex service latency and semantic quality remain external and variable.
+- **Next action:** Verify and publish the maintenance candidate, then ask whether the user wants to opt the interactive command and LaunchAgent into standard API billing through the dedicated profile.
+- **Claim boundary:** Exact orchestration, schema-bound identity/value requirements, Luna max default routing, bounded Sol fallback, cancellation, installation, shell resolution, dirty gating, sequential launchd execution, and successful commit reporting are proven. The escaped large-shard failure is attributable only as a Codex invocation rejection until the repaired CLI captures the provider reason; API billing is not enabled without explicit user choice.
 
 ## 8) Proof & Human Acceptance
 
@@ -133,7 +139,9 @@
 - **Fresh repair evidence:** Real release run `01668d4069f8` passed the supported structured-output schema, Luna in 1m11s, Sol in 14s, and committed in 1m26s. After global and consumer repinning, the loaded LaunchAgent completed `idavoll-games` commit `3dba070fdfa5` with three Luna shards (23s, 1m26s, 1m32s) in 1m57s, then backend commit `4dea23f642a4` with two shards (54s, 1m40s) in 2m02s; the job exited 0. Both committed trees contain the exact repair SHA, while clean frontend/studio repositories produced no invocation.
 - **Fresh large-sweep repair evidence:** `npm test` passed 39/39, including public-CLI journeys that commit 501 removed files plus one changed lockfile and 501 ordinary modified source files. Lockfile bodies stayed out of both model prompts, and the high-cardinality source sweep became one bounded path summary rather than a count failure. A replay of the escaped `idavoll-games` commit built a 506,109-byte packet from all 1,231 raw changes as 84 evidence entries across four 149–162 KiB shard packets; it retained all 37 work-spec candidates with no unmapped required spec.
 - **Fresh Luna-writer candidate evidence:** `npm test` passed 45/45 on 2026-08-15, including Luna xhigh → Luna max routing, role-aware same-model fixtures, two bounded Luna message attempts, one-shot Sol fallback, prompt-contract assertions, and revised per-model cost accounting. Runtime syntax checks, `git diff --check`, direct `--help`, and the seven-file zero-runtime-dependency 0.2.9 pack boundary passed.
-- **Remaining fresh evidence:** None inside the declared lane.
+- **Fresh diagnostic reproduction:** Before the fix, the public CLI/fake-Codex journey reported only `exit 1` when Codex emitted a `turn.failed` usage-limit event on stdout. The repaired candidate surfaces the final bounded message/code and excludes a staged private marker carried by an unrelated JSON field.
+- **Fresh 0.2.10 candidate evidence:** `npm test` passed 48/48, including inherited and overridden Codex-home journeys, raw API-key non-forwarding, structured failure recovery, and staged-prompt redaction. Runtime syntax checks, `git diff --check`, and the seven-file zero-runtime-dependency `npm pack --dry-run --json` boundary passed.
+- **Remaining fresh evidence:** Pushed/global resolution and consumer repins remain pending; a real large-shard rerun is intentionally deferred until the authentication/billing choice is explicit.
 - **Blind spot:** Live Codex service latency and semantic variability remain external; the deterministic harness proves orchestration and validation, not model service speed.
 
 ## 9) Decisions & Supporting References
@@ -143,6 +151,7 @@
 - **Binding decision:** 2026-08-14 / remove local runtime copies in the same migration / one-clear-path ownership and no fork drift / rollback is a forward consumer dependency change to a known upstream commit.
 - **Binding decision:** 2026-08-14 / use at most four deterministic, size-balanced Luna shards for non-trivial frozen snapshots, then revalidate their merged output against the full packet before final writing / directly targets measured Luna latency while keeping deterministic code—not a model—as coverage authority / reopen if live latency or output quality regresses materially.
 - **Binding decision:** 2026-08-15 / use Luna max for normal final writing with one repair and retain Sol high only as a one-shot fallback after two repairable invalid messages; write journey/unlock fields for a product manager as concrete actor, capability, and consequence / same-evidence A/B showed materially lower cost and narrowly stronger quality, while both candidates exposed the need to distinguish planned journeys from shipped behavior / user request / reopen if live semantic quality materially regresses.
+- **Binding decision:** 2026-08-15 / expose one optional `AUTO_COMMIT_CODEX_HOME` rather than forwarding `OPENAI_API_KEY`, mutating the caller profile, or rotating Ratatosk accounts / keeps authentication and billing explicit while allowing unattended automation to own a stable cached credential / user request plus official Codex authentication behavior / switching the installed command or LaunchAgent to paid API billing remains a human choice.
 - **Binding decision:** 2026-08-14 / keep the full frozen index as commit authority, compact complete removed subtrees first, then progressively summarize coherent path cohorts whenever detailed evidence exceeds the bounded model budget; keep recognized dependency lockfiles metadata-only / file count and model packet size must degrade evidence detail rather than reject an otherwise safe sweep, while generated dependency state should not consume patch context / reopen if a consumer needs semantic lockfile analysis or a different compaction priority.
 - **Binding decision:** 2026-08-14 / globally install the exact pushed Git commit; `gcm` delegates to `auto-commit --once` rather than separately running `git add`; one canonical staging owner preserves snapshot semantics / user request and one-clear-path design / reopen if the public CLI gains a different canonical one-shot command.
 - **Binding decision:** 2026-08-14 / one user LaunchAgent checks the four canonical Idavoll checkouts sequentially every 600 seconds and skips clean repositories before invoking the tool / avoids four schedulers, duplicate model load, and clean no-op noise / reopen when the canonical local repository set changes.
