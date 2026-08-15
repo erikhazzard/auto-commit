@@ -81,6 +81,8 @@ const LUNA_VALUE_CANDIDATE_KINDS = Object.freeze([
   'engineering_unlock',
 ]);
 const REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
+const UNICODE_FORMAT_CHARACTER_PATTERN = /\p{Cf}/u;
+const SENTENCE_TERMINAL_PATTERN = /[.?!…](?:["']|\p{Pe}|\p{Pf})*$/u;
 const TERMINAL_HEADER = 'AUTO COMMIT';
 
 const TERMINAL_PHASE_WIDTH = 10;
@@ -634,7 +636,12 @@ function summarizeEvidencePacketBytes(packet) {
   };
 }
 
-function normalizeSingleLine(value, { field, maximumLength, nullable = false } = {}) {
+function normalizeSingleLine(value, {
+  field,
+  maximumLength,
+  nullable = false,
+  sentence = false,
+} = {}) {
   if (value === null && nullable) return null;
   if (typeof value !== 'string') {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${field} must be a string${nullable ? ' or null' : ''}.`);
@@ -642,12 +649,23 @@ function normalizeSingleLine(value, { field, maximumLength, nullable = false } =
   if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)) {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${field} contains a control character.`);
   }
+  if (UNICODE_FORMAT_CHARACTER_PATTERN.test(value)) {
+    throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${field} contains a Unicode format character.`);
+  }
   const normalized = value.replace(/\s+/gu, ' ').trim();
   if (!normalized && !nullable) {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${field} must not be empty.`);
   }
   if (normalized.length > maximumLength) {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', `${field} exceeds ${maximumLength} characters.`);
+  }
+  // A writer once padded a max-length field with U+200B and committed a mid-word truncation.
+  // Rendered body prose stays repairable only while incomplete sentences fail closed here.
+  if (normalized && sentence && !SENTENCE_TERMINAL_PATTERN.test(normalized)) {
+    throw new AutomaticCommitError(
+      'INVALID_MODEL_OUTPUT',
+      `${field} must be a complete sentence ending in ".", "?", "!", or "…".`,
+    );
   }
   return normalized || null;
 }
@@ -1020,16 +1038,19 @@ export function validateFinalMessage(rawMessage, lunaReport) {
     field: 'userJourney',
     maximumLength: MESSAGE_VALUE_MAX_CHARACTERS,
     nullable: true,
+    sentence: true,
   });
   const developerJourney = normalizeSingleLine(rawMessage.developerJourney, {
     field: 'developerJourney',
     maximumLength: MESSAGE_VALUE_MAX_CHARACTERS,
     nullable: true,
+    sentence: true,
   });
   const engineeringUnlock = normalizeSingleLine(rawMessage.engineeringUnlock, {
     field: 'engineeringUnlock',
     maximumLength: MESSAGE_VALUE_MAX_CHARACTERS,
     nullable: true,
+    sentence: true,
   });
   if (!userJourney && !developerJourney && !engineeringUnlock) {
     throw new AutomaticCommitError(
@@ -1041,6 +1062,7 @@ export function validateFinalMessage(rawMessage, lunaReport) {
     field: 'workstreams',
     maximumLength: MESSAGE_WORKSTREAMS_MAX_CHARACTERS,
     nullable: true,
+    sentence: true,
   });
   if (expectedStreamIds.length > 1 && !workstreams) {
     throw new AutomaticCommitError('INVALID_MODEL_OUTPUT', 'Final writer must summarize multiple workstreams in one sentence.');
@@ -1069,6 +1091,7 @@ export function validateFinalMessage(rawMessage, lunaReport) {
     field: 'proof',
     maximumLength: MESSAGE_PROOF_MAX_CHARACTERS,
     nullable: true,
+    sentence: true,
   });
   const hasRecordedReceipt = lunaReport.workstreams.some((stream) => (
     stream.proof.some((item) => item.kind === 'recorded_receipt')
@@ -1095,6 +1118,7 @@ export function validateFinalMessage(rawMessage, lunaReport) {
       field: 'scope',
       maximumLength: MESSAGE_SCOPE_MAX_CHARACTERS,
       nullable: true,
+      sentence: true,
     }),
     workSpecs,
   };

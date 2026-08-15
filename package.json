@@ -1,6 +1,6 @@
 {
   "name": "@erikhazzard/auto-commit",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Generate evidence-bound Git sweep commits with Codex.",
   "type": "module",
   "license": "UNLICENSED",

@@ -105,7 +105,7 @@ Large sweeps are compacted before model invocation without changing the frozen G
 
 ## What the message contains
 
-Every message has one subject plus at least one `User journey`, `Developer journey`, or `Engineering unlock`. Those value lines are written for a product manager: they name the affected actor or system, the changed ability or workflow, and why the consequence matters. Specification-, plan-, documentation-, and test-only changes are framed as decisions, intended journeys, review clarity, or retained proof—not as product behavior that already shipped. Multiple distinct workstreams receive one concise aggregate line. `Proof` and `Scope` appear only when they add useful, evidence-supported information.
+Every message has one subject plus at least one `User journey`, `Developer journey`, or `Engineering unlock`. Those value lines are written for a product manager: they name the affected actor or system, the changed ability or workflow, and why the consequence matters. Specification-, plan-, documentation-, and test-only changes are framed as decisions, intended journeys, review clarity, or retained proof—not as product behavior that already shipped. Multiple distinct workstreams receive one concise aggregate line. `Proof` and `Scope` appear only when they add useful, evidence-supported information. Every rendered body field must be a complete sentence; invisible Unicode format characters and incomplete prose are rejected through the same bounded writer-repair path instead of entering Git history.
 
 Work specs are optional. When the frozen snapshot contains a discoverable, relevant file named `work-spec.md`, it renders with the Git repository directory name and its actual repository-relative path:
 

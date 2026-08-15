@@ -53,6 +53,7 @@ const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_EVIDENCE_USAGE',
   'FAKE_CODEX_OMIT_LUNA_SHARD_ALWAYS',
   'FAKE_CODEX_OMIT_LUNA_SHARD_ONCE',
+  'FAKE_CODEX_CORRUPTED_WRITER_FIRST',
   'FAKE_CODEX_MALFORMED_WRITER_FIRST',
   'FAKE_CODEX_MUTATE_CONTENT',
   'FAKE_CODEX_MUTATE_PATH',
@@ -62,6 +63,7 @@ const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_FALLBACK_USAGE',
   'FAKE_CODEX_TARGET_REPO',
 ];
+const ESCAPED_CORRUPTED_WORKSTREAMS = 'The snapshot combines SDK pacing and scoring implementation and guidance, Character3D audio layout and deferred-startup work, animation and VFX curation, hosted-DEV asset workflow and terrain review updates, plus dependency, type-de\u200B\u200Blar\u200B\u200Ba';
 
 async function git(repoRoot, args) {
   const result = await execFileAsync('git', args, {
@@ -309,7 +311,9 @@ if (role === 'evidence' && model === 'gpt-5.6-luna') {
     developerJourney: report.workstreams.map((stream) => stream.developerJourneyCandidate).find(Boolean) || null,
     engineeringUnlock: report.workstreams.map((stream) => stream.engineeringUnlockCandidate).find(Boolean) || null,
     workstreams: report.workstreams.length > 1
-      ? report.workstreams.map((stream) => stream.title).join(' and ') + '.'
+      ? process.env.FAKE_CODEX_CORRUPTED_WRITER_FIRST && firstWriterCall
+        ? ${JSON.stringify(ESCAPED_CORRUPTED_WORKSTREAMS)}
+        : report.workstreams.map((stream) => stream.title).join(' and ') + '.'
       : null,
     proof: (process.env.FAKE_CODEX_INVALID_WRITER_FIRST && firstWriterCall)
       || (process.env.FAKE_CODEX_INVALID_LUNA_WRITER_ALWAYS && model === 'gpt-5.6-luna')
@@ -650,6 +654,88 @@ describe.sequential('automatic commit core flow', () => {
       scope: null,
       workSpecs: [],
     }, lunaReport)).toThrow(/changed or duplicated a Luna workstream ID/);
+  });
+
+  it('rejects invisible format characters and incomplete final body sentences', () => {
+    const lunaReport = {
+      snapshotId: 'snapshot',
+      workstreams: [{
+        id: 'lane',
+        proof: [{ kind: 'staged_change' }],
+        workSpecs: [],
+      }],
+    };
+    const validMessage = {
+      subject: 'keep compact messages readable',
+      workstreamIds: ['lane'],
+      userJourney: 'Creators can read the resulting history.',
+      developerJourney: 'Maintainers can read the resulting history.',
+      engineeringUnlock: 'The system keeps generated history reviewable.',
+      workstreams: 'The snapshot contains one coherent workstream.',
+      proof: 'The staged diff contains the described change.',
+      scope: 'Runtime behavior remains outside the staged evidence.',
+      workSpecs: [],
+    };
+
+    expect([...ESCAPED_CORRUPTED_WORKSTREAMS]).toHaveLength(240);
+    expect(() => validateFinalMessage({
+      ...validMessage,
+      workstreams: ESCAPED_CORRUPTED_WORKSTREAMS,
+    }, lunaReport)).toThrow(/Unicode format character/);
+    const maximumLengthMidWord = 'a'.repeat(240);
+    const historicalCommaEnding = `${'a'.repeat(238)},`;
+    expect([...maximumLengthMidWord]).toHaveLength(240);
+    expect([...historicalCommaEnding]).toHaveLength(239);
+    for (const incompleteWorkstreams of [maximumLengthMidWord, historicalCommaEnding]) {
+      expect(() => validateFinalMessage({
+        ...validMessage,
+        workstreams: incompleteWorkstreams,
+      }, lunaReport)).toThrow(/complete sentence/);
+    }
+    for (const field of [
+      'userJourney',
+      'developerJourney',
+      'engineeringUnlock',
+      'workstreams',
+      'proof',
+      'scope',
+    ]) {
+      expect(() => validateFinalMessage({
+        ...validMessage,
+        [field]: 'Incomplete body prose',
+      }, lunaReport)).toThrow(/complete sentence/);
+    }
+
+    const maximumLengthSentence = `${'a'.repeat(239)}.`;
+    expect([...maximumLengthSentence]).toHaveLength(240);
+    expect(validateFinalMessage({
+      ...validMessage,
+      workstreams: maximumLengthSentence,
+    }, lunaReport).workstreams).toBe(maximumLengthSentence);
+  });
+
+  it('preserves valid non-ASCII final prose', () => {
+    const lunaReport = {
+      snapshotId: 'snapshot',
+      workstreams: [{
+        id: 'lane',
+        proof: [{ kind: 'staged_change' }],
+        workSpecs: [],
+      }],
+    };
+    const developerJourney = 'Les créateurs peuvent relire un résumé fidèle et poursuivre leur travail…';
+
+    expect(validateFinalMessage({
+      subject: 'preserve international commit prose',
+      workstreamIds: ['lane'],
+      userJourney: null,
+      developerJourney,
+      engineeringUnlock: null,
+      workstreams: null,
+      proof: null,
+      scope: null,
+      workSpecs: [],
+    }, lunaReport).developerJourney).toBe(developerJourney);
   });
 
   it('routes a frozen multi-stream snapshot through Luna xhigh and Luna max', async () => {
@@ -1680,6 +1766,39 @@ exit 0
     }));
     expect(await git(repoRoot, ['log', '-1', '--format=%B'])).toContain('no fresh test run was supplied');
   });
+
+  it('repairs escaped zero-width corruption before the CLI commits', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    await writeRepoFile(repoRoot, 'src/creator.js', 'export const repairedProse = true;\n');
+    await writeRepoFile(
+      repoRoot,
+      'docs/work/automatic-commit/work-spec.md',
+      '# Automatic commit\n\nEngineering unlock: preserve readable history.\n',
+    );
+
+    const result = await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 8 * 1024 * 1024,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_CORRUPTED_WRITER_FIRST: '1',
+      },
+    });
+
+    expect(result.stdout).toMatch(/^Committed [0-9a-f]{12} capture creator behavior and delivery planning\n$/u);
+    const calls = await readFakeCalls(logPath);
+    expect(calls.map((call) => call.role)).toEqual(['evidence', 'writer', 'writer']);
+    expect(calls[2].prompt).toContain('contains a Unicode format character');
+    const message = await git(repoRoot, ['log', '-1', '--format=%B']);
+    expect(message).not.toContain('\u200B');
+    expect(message).not.toContain('type-de');
+    expect(message).toContain('Workstreams: Delivery planning and Creator behavior.');
+  }, 15_000);
 
   it('gives malformed Luna max JSON one bounded repair attempt', async () => {
     const repoRoot = await createRepository();

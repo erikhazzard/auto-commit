@@ -7,6 +7,7 @@
 - 2026-08-14 — Erik requested that the finished tool become a standalone repository at `git@github.com:erikhazzard/auto-commit.git`, be installed as a development dependency in the named repositories, and be run in each.
 - 2026-08-15 — After a same-evidence A/B comparison, Erik selected Luna max as the default final writer and asked that journeys and engineering unlocks explain impact in product-manager language.
 - 2026-08-15 — After a four-shard run failed with only `exit 1`, Erik asked whether subscription rate limits were responsible and proposed either another Ratatosk account or the existing API key as a more reliable automation identity.
+- 2026-08-15 — Erik explicitly approved switching both interactive `gcm` and the ten-minute LaunchAgent to a dedicated API-key-authenticated Codex profile under standard API billing, followed by an immediate real repository run.
 
 ## Surviving rationale
 
