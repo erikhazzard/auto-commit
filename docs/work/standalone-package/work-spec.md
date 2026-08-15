@@ -119,10 +119,10 @@
 
 ## 7) Current Motion
 
-- **Lane state:** Maintenance candidate in progress after the 2026-08-15 Luna max release: preserve the provider's structured failure reason and add an explicit standalone auth-profile seam.
+- **Lane state:** Maintenance release 0.2.10 is pushed, globally installed, and written into both active consumer manifests and lockfiles; the consumer pins remain part of their existing uncommitted work.
 - **Approval:** Erik's 2026-08-14 requests authorize the standalone push and consumer runs, then bounded parallel Luna extraction, global `gcm`, and a ten-minute local macOS job over the Idavoll repositories.
 - **Active rung:** `STANDALONE-AUTO-COMMIT__M2` complete.
-- **Next action:** Verify and publish the maintenance candidate, then ask whether the user wants to opt the interactive command and LaunchAgent into standard API billing through the dedicated profile.
+- **Next action:** Ask whether the user wants to opt the interactive command and LaunchAgent into standard API billing through the dedicated profile, then rerun the escaped large-shard journey under the chosen identity.
 - **Claim boundary:** Exact orchestration, schema-bound identity/value requirements, Luna max default routing, bounded Sol fallback, cancellation, installation, shell resolution, dirty gating, sequential launchd execution, and successful commit reporting are proven. The escaped large-shard failure is attributable only as a Codex invocation rejection until the repaired CLI captures the provider reason; API billing is not enabled without explicit user choice.
 
 ## 8) Proof & Human Acceptance
@@ -140,8 +140,8 @@
 - **Fresh large-sweep repair evidence:** `npm test` passed 39/39, including public-CLI journeys that commit 501 removed files plus one changed lockfile and 501 ordinary modified source files. Lockfile bodies stayed out of both model prompts, and the high-cardinality source sweep became one bounded path summary rather than a count failure. A replay of the escaped `idavoll-games` commit built a 506,109-byte packet from all 1,231 raw changes as 84 evidence entries across four 149–162 KiB shard packets; it retained all 37 work-spec candidates with no unmapped required spec.
 - **Fresh Luna-writer candidate evidence:** `npm test` passed 45/45 on 2026-08-15, including Luna xhigh → Luna max routing, role-aware same-model fixtures, two bounded Luna message attempts, one-shot Sol fallback, prompt-contract assertions, and revised per-model cost accounting. Runtime syntax checks, `git diff --check`, direct `--help`, and the seven-file zero-runtime-dependency 0.2.9 pack boundary passed.
 - **Fresh diagnostic reproduction:** Before the fix, the public CLI/fake-Codex journey reported only `exit 1` when Codex emitted a `turn.failed` usage-limit event on stdout. The repaired candidate surfaces the final bounded message/code and excludes a staged private marker carried by an unrelated JSON field.
-- **Fresh 0.2.10 candidate evidence:** `npm test` passed 48/48, including inherited and overridden Codex-home journeys, raw API-key non-forwarding, structured failure recovery, and staged-prompt redaction. Runtime syntax checks, `git diff --check`, and the seven-file zero-runtime-dependency `npm pack --dry-run --json` boundary passed.
-- **Remaining fresh evidence:** Pushed/global resolution and consumer repins remain pending; a real large-shard rerun is intentionally deferred until the authentication/billing choice is explicit.
+- **Fresh 0.2.10 release evidence:** `npm test` passed 48/48, including inherited and overridden Codex-home journeys, raw API-key non-forwarding, structured failure recovery, and staged-prompt redaction. Runtime syntax checks, `git diff --check`, and the seven-file zero-runtime-dependency `npm pack --dry-run --json` boundary passed. Release `9c85d4e37f2cd3cfff8f0f0fbb7425ac5c8e8e76` is pushed; the global package and both consumers' local installed copies report 0.2.10 and byte-match its executable; both consumer manifests and lockfiles name the exact release SHA.
+- **Remaining fresh evidence:** The consumer pin edits remain intentionally uncommitted among each repository's existing work. A real large-shard rerun is intentionally deferred until the authentication/billing choice is explicit, so the original provider rejection remains unclassified beyond a Codex invocation failure.
 - **Blind spot:** Live Codex service latency and semantic variability remain external; the deterministic harness proves orchestration and validation, not model service speed.
 
 ## 9) Decisions & Supporting References
