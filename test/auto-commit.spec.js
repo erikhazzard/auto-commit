@@ -49,6 +49,8 @@ const FAKE_ENVIRONMENT_KEYS = [
   'FAKE_CODEX_HANG_LUNA_SHARDS',
   'FAKE_CODEX_INVALID_SOL_FIRST',
   'FAKE_CODEX_LUNA_USAGE',
+  'FAKE_CODEX_OMIT_LUNA_SHARD_ALWAYS',
+  'FAKE_CODEX_OMIT_LUNA_SHARD_ONCE',
   'FAKE_CODEX_MALFORMED_SOL_FIRST',
   'FAKE_CODEX_MUTATE_CONTENT',
   'FAKE_CODEX_MUTATE_PATH',
@@ -143,18 +145,30 @@ if (logPath) {
   }) + '\\n');
 }
 
-function parseEnvelope(tag) {
+function parseEnvelopeFromPrompt(promptText, tag) {
   const opening = '<' + tag + '>\\n';
   const closing = '\\n</' + tag + '>';
-  const start = prompt.indexOf(opening);
-  const end = prompt.indexOf(closing, start + opening.length);
+  const start = promptText.indexOf(opening);
+  const end = promptText.indexOf(closing, start + opening.length);
   if (start < 0 || end < 0) throw new Error('Missing ' + tag);
-  return JSON.parse(prompt.slice(start + opening.length, end));
+  return JSON.parse(promptText.slice(start + opening.length, end));
+}
+
+function parseEnvelope(tag) {
+  return parseEnvelopeFromPrompt(prompt, tag);
 }
 
 let output;
 if (model === 'gpt-5.6-luna') {
   const packet = parseEnvelope('snapshot_packet');
+  const priorSameShardCalls = priorCalls.filter((call) => {
+    if (call.model !== 'gpt-5.6-luna') return false;
+    try {
+      return parseEnvelopeFromPrompt(call.prompt, 'snapshot_packet').shard?.index === packet.shard?.index;
+    } catch {
+      return false;
+    }
+  }).length;
   const expectedLunaShards = Number.parseInt(process.env.FAKE_CODEX_EXPECTED_LUNA_SHARDS || '0', 10);
   if (expectedLunaShards > 1) {
     const barrierDeadline = Date.now() + 5_000;
@@ -243,6 +257,16 @@ if (model === 'gpt-5.6-luna') {
       kind: 'developer_journey',
       text: 'A maintainer can also use a redundant restatement of that workflow.',
     }];
+  }
+  const omitTargetShard = process.env.FAKE_CODEX_OMIT_LUNA_SHARD_ALWAYS
+    || process.env.FAKE_CODEX_OMIT_LUNA_SHARD_ONCE;
+  const omitAssignedChange = omitTargetShard === String(packet.shard?.index)
+    && (Boolean(process.env.FAKE_CODEX_OMIT_LUNA_SHARD_ALWAYS) || priorSameShardCalls === 0);
+  if (omitAssignedChange && packet.manifest[0]) {
+    const omittedChangeId = packet.manifest[0].id;
+    for (const workstream of output.workstreams) {
+      workstream.changeIds = workstream.changeIds.filter((changeId) => changeId !== omittedChangeId);
+    }
   }
 } else if (model === 'gpt-5.6-sol') {
   const report = parseEnvelope('validated_luna_report');
@@ -1087,6 +1111,121 @@ describe.sequential('automatic commit core flow', () => {
         'gpt-5.6-sol': 0.0091,
       },
     });
+  });
+
+  it('repairs one incomplete Luna shard without rerunning successful siblings', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    process.env.FAKE_CODEX_LOG = logPath;
+    process.env.FAKE_CODEX_EXPECTED_LUNA_SHARDS = '2';
+    process.env.FAKE_CODEX_OMIT_LUNA_SHARD_ONCE = '1';
+    for (let index = 0; index < 10; index += 1) {
+      await writeRepoFile(repoRoot, `src/repair-${index}.js`, `export const repair${index} = true;\n`);
+    }
+    const progressEvents = [];
+
+    const result = await runAutomaticCommitOnce({
+      repoRoot,
+      codexBin,
+      log: (_message, event) => progressEvents.push(event),
+    });
+
+    expect(result.status).toBe('committed');
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    expect(lunaCalls).toHaveLength(3);
+    expect(calls.filter((call) => call.model === 'gpt-5.6-sol')).toHaveLength(1);
+    const firstShardCalls = lunaCalls.filter((call) => (
+      parsePromptEnvelope(call.prompt, 'snapshot_packet').shard.index === 1
+    ));
+    const secondShardCalls = lunaCalls.filter((call) => (
+      parsePromptEnvelope(call.prompt, 'snapshot_packet').shard.index === 2
+    ));
+    expect(firstShardCalls).toHaveLength(2);
+    expect(secondShardCalls).toHaveLength(1);
+
+    const firstShardPacket = parsePromptEnvelope(firstShardCalls[0].prompt, 'snapshot_packet');
+    const omittedChange = firstShardPacket.manifest[0];
+    const repairRequest = parsePromptEnvelope(firstShardCalls[1].prompt, 'repair_request');
+    expect(repairRequest.validatorFeedback).toContain(omittedChange.id);
+    expect(repairRequest.validatorFeedback).toContain(JSON.stringify(omittedChange.path));
+    expect(repairRequest.requiredAssignedChanges).toEqual(firstShardPacket.manifest.map((change) => ({
+      id: change.id,
+      status: change.status,
+      path: change.path ?? null,
+      oldPath: change.oldPath ?? null,
+      kind: change.kind,
+    })));
+    expect(progressEvents).toContainEqual(expect.objectContaining({
+      phase: 'LUNA 1/2',
+      state: 'warning',
+      prettyMessage: 'Coverage incomplete; retrying shard',
+      metric: 'attempt 2/2',
+      detail: expect.stringContaining(omittedChange.path),
+    }));
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 4_400,
+      cachedInputTokens: 1_400,
+      outputTokens: 1_100,
+      reasoningOutputTokens: 700,
+      totalTokens: 5_500,
+    });
+    expect(result.apiCostEstimate).toEqual({
+      currency: 'USD',
+      pricingAsOf: '2026-08-14',
+      estimatedUsd: 0.010684,
+      byModelUsd: {
+        'gpt-5.6-luna': 0.001584,
+        'gpt-5.6-sol': 0.0091,
+      },
+    });
+  });
+
+  it('reports completed model cost when Luna exhausts its repair attempt', async () => {
+    const repoRoot = await createRepository();
+    const codexBin = await createFakeCodex(repoRoot);
+    const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
+    for (let index = 0; index < 10; index += 1) {
+      await writeRepoFile(repoRoot, `src/unrepairable-${index}.js`, `export const unrepairable${index} = true;\n`);
+    }
+
+    let failure;
+    try {
+      await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 10_000,
+        maxBuffer: 8 * 1024 * 1024,
+        env: {
+          ...process.env,
+          FAKE_CODEX_EXPECTED_LUNA_SHARDS: '2',
+          FAKE_CODEX_LOG: logPath,
+          FAKE_CODEX_OMIT_LUNA_SHARD_ALWAYS: '1',
+          FAKE_CODEX_TARGET_REPO: repoRoot,
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.code).toBe(1);
+    const calls = await readFakeCalls(logPath);
+    const lunaCalls = calls.filter((call) => call.model === 'gpt-5.6-luna');
+    expect(lunaCalls).toHaveLength(3);
+    expect(calls.some((call) => call.model === 'gpt-5.6-sol')).toBe(false);
+    const firstShardPacket = parsePromptEnvelope(
+      lunaCalls.find((call) => parsePromptEnvelope(call.prompt, 'snapshot_packet').shard.index === 1).prompt,
+      'snapshot_packet',
+    );
+    const omittedChange = firstShardPacket.manifest[0];
+    const pathAwareFailure = `Luna omitted ${omittedChange.id} (${JSON.stringify(omittedChange.path)}).`;
+    expect(failure.stderr).toContain(pathAwareFailure);
+    const costLine = 'Estimated API-equivalent model cost before failure: approximately $0.0016';
+    expect(failure.stderr).toContain(costLine);
+    expect(failure.stderr.indexOf(costLine)).toBeLessThan(failure.stderr.lastIndexOf(pathAwareFailure));
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
+    expect((await git(repoRoot, ['diff', '--cached', '--name-only'])).trim().split('\n')).toHaveLength(10);
   });
 
   it('commits a retired subtree above the raw change ceiling without exposing lockfile bodies', async () => {
