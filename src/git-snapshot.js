@@ -59,14 +59,14 @@ function appendBoundedTail(current, chunk, maximumBytes) {
   return combined.length <= maximumBytes ? combined : combined.subarray(combined.length - maximumBytes);
 }
 
-export async function runProcess({
+export async function runProcessStreaming({
   command,
   args,
   cwd,
   env = process.env,
   input,
   timeoutMs = 60_000,
-  maximumStdoutBytes = MAX_PROCESS_STDOUT_BYTES,
+  onStdoutChunk = () => {},
   signal,
 }) {
   if (signal?.aborted) {
@@ -80,8 +80,6 @@ export async function runProcess({
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: ownsProcessGroup,
     });
-    const stdoutChunks = [];
-    let stdoutBytes = 0;
     let stderrTail = Buffer.alloc(0);
     let terminalError = null;
     let stdinError = null;
@@ -107,7 +105,6 @@ export async function runProcess({
       resolve({
         code: childClose.code,
         signal: childClose.signal,
-        stdout: Buffer.concat(stdoutChunks),
         stderr: stderrTail,
       });
     };
@@ -151,16 +148,15 @@ export async function runProcess({
     signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout.on('data', (chunk) => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > maximumStdoutBytes && !terminalError) {
-        terminalError = new AutomaticCommitError(
-          'OUTPUT_LIMIT',
-          `${command} produced more than ${maximumStdoutBytes} stdout bytes.`,
-        );
+      if (terminalError) return;
+      try {
+        onStdoutChunk(Buffer.from(chunk));
+      } catch (error) {
+        terminalError = error instanceof Error
+          ? error
+          : new AutomaticCommitError('PROCESS_OUTPUT_FAILED', `${command} output handling failed.`);
         stopChild();
-        return;
       }
-      if (!terminalError) stdoutChunks.push(Buffer.from(chunk));
     });
     child.stderr.on('data', (chunk) => {
       stderrTail = appendBoundedTail(stderrTail, chunk, MAX_PROCESS_STDERR_BYTES);
@@ -213,6 +209,40 @@ export async function runProcess({
     if (input === undefined) child.stdin.end();
     else child.stdin.end(input);
   });
+}
+
+export async function runProcess({
+  command,
+  args,
+  cwd,
+  env = process.env,
+  input,
+  timeoutMs = 60_000,
+  maximumStdoutBytes = MAX_PROCESS_STDOUT_BYTES,
+  signal,
+}) {
+  const stdoutChunks = [];
+  let stdoutBytes = 0;
+  const result = await runProcessStreaming({
+    command,
+    args,
+    cwd,
+    env,
+    input,
+    timeoutMs,
+    signal,
+    onStdoutChunk(chunk) {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maximumStdoutBytes) {
+        throw new AutomaticCommitError(
+          'OUTPUT_LIMIT',
+          `${command} produced more than ${maximumStdoutBytes} stdout bytes.`,
+        );
+      }
+      stdoutChunks.push(chunk);
+    },
+  });
+  return { ...result, stdout: Buffer.concat(stdoutChunks) };
 }
 
 export async function runGitCommand({ repoRoot, args, env, allowedExitCodes = [0], maximumStdoutBytes, signal }) {

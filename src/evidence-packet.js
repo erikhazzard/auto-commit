@@ -14,24 +14,28 @@
 
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { TextDecoder } from 'node:util';
 
 import {
   AutomaticCommitError,
   runGitCommand,
   runProcess,
+  runProcessStreaming,
 } from './git-snapshot.js';
 
 const TARGET_EVIDENCE_ENTRIES = 160;
 const TARGET_EVIDENCE_MANIFEST_BYTES = 160_000;
 const MIN_DELETED_PATH_GROUP_ENTRIES = 20;
 const MAX_PATH_GROUP_SAMPLES = 6;
-const LFS_ATTRIBUTE_PATH_BATCH_SIZE = 500;
 const MAX_RAW_MANIFEST_BYTES = 128 * 1024 * 1024;
 const MAX_PER_FILE_DIFF_BYTES = 2_000_000;
 const MAX_PATCH_CONTEXT_BYTES = 300_000;
 const MAX_DIFF_STAT_CONTEXT_BYTES = 32_000;
-const MAX_NON_LFS_BLOB_BYTES = 10 * 1024 * 1024;
-const MAX_SECRET_SCAN_BATCH_BYTES = 16 * 1024 * 1024;
+const MAX_DETAILED_BLOB_BYTES = 512_000;
+const SECRET_SCAN_OID_BATCH_SIZE = 500;
+const SECRET_SCAN_BLOCK_BYTES = 64 * 1024;
+const SECRET_SCAN_OVERLAP_BYTES = 128;
+const MAX_CAT_FILE_HEADER_BYTES = 160;
 const MAX_CONTEXT_DOCUMENT_BYTES = 48_000;
 const MAX_AGENT_CONTRACT_CONTEXT_BYTES = 64_000;
 const MAX_WORK_SPEC_CONTEXT_BYTES = 96_000;
@@ -62,13 +66,15 @@ const DEPENDENCY_LOCKFILE_NAMES = new Set([
   'uv.lock',
   'yarn.lock',
 ]);
+// Match once the minimum credential shape is present. Requiring a trailing word boundary would make bounded
+// streaming unsafe for arbitrarily long token-shaped input because the prefix could fall out of the carry window.
 const SECRET_PATTERNS = Object.freeze([
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/],
-  ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
-  ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{30,}\b/],
-  ['OpenAI API key', /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/],
-  ['Slack token', /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/],
-  ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}/],
+  ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{30}/],
+  ['OpenAI API key', /\bsk-(?:proj-)?[A-Za-z0-9_-]{20}/],
+  ['Slack token', /\bxox[baprs]-[A-Za-z0-9-]{20}/],
+  ['Google API key', /\bAIza[0-9A-Za-z_-]{35}/],
 ]);
 
 function hashBuffer(value) {
@@ -149,28 +155,7 @@ async function readBlobSizes({ repoRoot, oids, env, signal }) {
   return sizes;
 }
 
-async function readLfsTrackedPaths({ repoRoot, changedPaths, env, signal }) {
-  if (changedPaths.length === 0) return new Set();
-  const lfsPaths = new Set();
-  for (let start = 0; start < changedPaths.length; start += LFS_ATTRIBUTE_PATH_BATCH_SIZE) {
-    const result = await runGitCommand({
-      repoRoot,
-      args: [
-        'check-attr', '--cached', '-z', 'filter', '--',
-        ...changedPaths.slice(start, start + LFS_ATTRIBUTE_PATH_BATCH_SIZE),
-      ],
-      env,
-      signal,
-    });
-    const values = splitNullTerminated(result.stdout);
-    for (let index = 0; index + 2 < values.length; index += 3) {
-      if (values[index + 1] === 'filter' && values[index + 2] === 'lfs') lfsPaths.add(values[index]);
-    }
-  }
-  return lfsPaths;
-}
-
-function assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap, lfsTrackedPaths }) {
+function assertSafeChangedPaths({ changes, stageMap }) {
   for (const change of changes) {
     for (const changedPath of [change.oldPath, change.path].filter(Boolean)) {
       if (changedPath.includes('\uFFFD')) {
@@ -189,13 +174,6 @@ function assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap, lfsTrack
     }
     if (change.oldMode === '160000' || change.newMode === '160000') {
       throw new AutomaticCommitError('GITLINK_CHANGE', `Refusing automatic gitlink/submodule change: ${change.path}`);
-    }
-    const blobSize = blobSizes.get(change.newOid) || 0;
-    if (blobSize > MAX_NON_LFS_BLOB_BYTES && !lfsTrackedPaths.has(change.path)) {
-      throw new AutomaticCommitError(
-        'OVERSIZED_BLOB',
-        `Refusing ${change.path}: staged blob is ${blobSize} bytes, above ${MAX_NON_LFS_BLOB_BYTES}.`,
-      );
     }
   }
   for (const protectedSymlinkPath of ['.codex/skills', '.claude/skills']) {
@@ -410,7 +388,7 @@ function buildEvidenceManifest({ changes, blobSizes, stageMap }) {
       || (change.oldPath ? isDependencyLockfile(change.oldPath) : false);
     const binaryFile = BINARY_FILE_EXTENSION_PATTERN.test(change.path)
       || (change.oldPath ? BINARY_FILE_EXTENSION_PATTERN.test(change.oldPath) : false);
-    const oversizedFile = Math.max(oldBlobSize, blobSize) > 512_000;
+    const oversizedFile = Math.max(oldBlobSize, blobSize) > MAX_DETAILED_BLOB_BYTES;
     if (dependencyLockfile) dependencyLockfileCount += 1;
     const manifestEntry = {
       ...change,
@@ -462,6 +440,99 @@ function findSecretViolation(text) {
   return null;
 }
 
+export function createIncrementalSecretScanner() {
+  let carry = Buffer.alloc(0);
+  return {
+    push(value) {
+      const input = Buffer.from(value);
+      for (let offset = 0; offset < input.length; offset += SECRET_SCAN_BLOCK_BYTES) {
+        const block = input.subarray(offset, Math.min(input.length, offset + SECRET_SCAN_BLOCK_BYTES));
+        const candidate = carry.length > 0 ? Buffer.concat([carry, block]) : block;
+        const violation = findSecretViolation(candidate.toString('latin1'));
+        carry = Buffer.from(candidate.subarray(Math.max(0, candidate.length - SECRET_SCAN_OVERLAP_BYTES)));
+        if (violation) return violation;
+      }
+      return null;
+    },
+  };
+}
+
+function createMetadataOnlyBatchParser(expectedBlobs) {
+  let expectedIndex = 0;
+  let phase = 'header';
+  let headerBuffer = Buffer.alloc(0);
+  let remainingContentBytes = 0;
+  let secretScanner = null;
+
+  const fail = (message) => {
+    throw new AutomaticCommitError('INVALID_GIT_OUTPUT', message);
+  };
+
+  const consumeHeader = (segment) => {
+    if (headerBuffer.length + segment.length > MAX_CAT_FILE_HEADER_BYTES) {
+      fail('A git cat-file batch header exceeded the bounded parser size.');
+    }
+    const header = headerBuffer.length > 0 ? Buffer.concat([headerBuffer, segment]) : segment;
+    headerBuffer = Buffer.alloc(0);
+    const match = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(header.toString('ascii'));
+    const expected = expectedBlobs[expectedIndex];
+    if (!match || !expected || match[1] !== expected.oid || Number.parseInt(match[2], 10) !== expected.blobSize) {
+      fail('git cat-file returned an unexpected metadata-only blob header.');
+    }
+    remainingContentBytes = expected.blobSize;
+    secretScanner = createIncrementalSecretScanner();
+    phase = remainingContentBytes === 0 ? 'separator' : 'content';
+  };
+
+  return {
+    push(chunk) {
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (phase === 'header') {
+          const newlineIndex = chunk.indexOf(10, offset);
+          if (newlineIndex < 0) {
+            const segment = chunk.subarray(offset);
+            if (headerBuffer.length + segment.length > MAX_CAT_FILE_HEADER_BYTES) {
+              fail('A git cat-file batch header exceeded the bounded parser size.');
+            }
+            headerBuffer = Buffer.concat([headerBuffer, segment]);
+            return;
+          }
+          consumeHeader(chunk.subarray(offset, newlineIndex));
+          offset = newlineIndex + 1;
+          continue;
+        }
+
+        if (phase === 'content') {
+          const bytesToConsume = Math.min(remainingContentBytes, chunk.length - offset);
+          const violation = secretScanner.push(chunk.subarray(offset, offset + bytesToConsume));
+          if (violation) {
+            throw new AutomaticCommitError(
+              'SECRET_DETECTED',
+              `A high-confidence ${violation} signature was found in metadata-only staged content; no model was called.`,
+            );
+          }
+          remainingContentBytes -= bytesToConsume;
+          offset += bytesToConsume;
+          if (remainingContentBytes === 0) phase = 'separator';
+          continue;
+        }
+
+        if (chunk[offset] !== 10) fail('git cat-file returned an invalid metadata-only blob separator.');
+        offset += 1;
+        expectedIndex += 1;
+        secretScanner = null;
+        phase = 'header';
+      }
+    },
+    finish() {
+      if (expectedIndex !== expectedBlobs.length || phase !== 'header' || headerBuffer.length !== 0) {
+        fail('git cat-file ended before every metadata-only blob was scanned.');
+      }
+    },
+  };
+}
+
 async function readBlobText({ repoRoot, oid, env, maximumBytes, label, signal }) {
   const result = await runGitCommand({
     repoRoot,
@@ -475,6 +546,91 @@ async function readBlobText({ repoRoot, oid, env, maximumBytes, label, signal })
     throw new AutomaticCommitError('NON_TEXT_CONTEXT', `${label} is not valid UTF-8 text.`);
   }
   return text;
+}
+
+function appendBoundedTail(current, chunk, maximumBytes) {
+  if (maximumBytes <= 0) return Buffer.alloc(0);
+  if (chunk.length >= maximumBytes) return Buffer.from(chunk.subarray(chunk.length - maximumBytes));
+  const combined = Buffer.concat([current, chunk]);
+  return combined.length <= maximumBytes
+    ? combined
+    : Buffer.from(combined.subarray(combined.length - maximumBytes));
+}
+
+async function readStreamedBlobContext({
+  repoRoot,
+  oid,
+  blobSize,
+  maximumContextBytes,
+  env,
+  label,
+  omissionLabel,
+  signal,
+}) {
+  const marker = `\n\n[${omissionLabel} body omitted between bounded excerpts of ${blobSize} bytes; blob ${oid}]\n\n`;
+  const excerptBytes = Math.max(0, maximumContextBytes - Buffer.byteLength(marker));
+  const headBytes = Math.ceil(excerptBytes * 0.7);
+  const tailBytes = Math.max(0, excerptBytes - headBytes);
+  const sha256 = crypto.createHash('sha256');
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let validUtf8 = true;
+  let streamedBytes = 0;
+  let head = Buffer.alloc(0);
+  let tail = Buffer.alloc(0);
+
+  const result = await runProcessStreaming({
+    command: 'git',
+    args: ['cat-file', 'blob', oid],
+    cwd: repoRoot,
+    env,
+    timeoutMs: 120_000,
+    signal,
+    onStdoutChunk(chunk) {
+      streamedBytes += chunk.length;
+      if (streamedBytes > blobSize) {
+        throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `git cat-file returned too many bytes while reading ${label}.`);
+      }
+      sha256.update(chunk);
+      if (head.length < headBytes) {
+        const needed = headBytes - head.length;
+        head = Buffer.concat([head, Buffer.from(chunk.subarray(0, Math.min(needed, chunk.length)))]);
+      }
+      tail = appendBoundedTail(tail, chunk, tailBytes);
+      if (validUtf8) {
+        try {
+          decoder.decode(chunk, { stream: true });
+        } catch {
+          validUtf8 = false;
+        }
+      }
+    },
+  });
+  if (result.code !== 0) {
+    throw new AutomaticCommitError('GIT_COMMAND_FAILED', `git cat-file failed while reading ${label}.`);
+  }
+  if (streamedBytes !== blobSize) {
+    throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `git cat-file returned incomplete content while reading ${label}.`);
+  }
+  if (validUtf8) {
+    try {
+      decoder.decode();
+    } catch {
+      validUtf8 = false;
+    }
+  }
+  const contentSha256 = sha256.digest('hex');
+  if (!validUtf8) {
+    return {
+      content: `[${omissionLabel} body omitted: ${blobSize} bytes, non-UTF-8, blob ${oid}]`,
+      contextDisposition: 'metadata-only',
+      contentSha256,
+    };
+  }
+  return {
+    content: `${decodeUtf8Head(head)}${marker}${decodeUtf8Tail(tail)}`,
+    contextDisposition: 'bounded-excerpt',
+    contentSha256,
+  };
 }
 
 async function readBoundedTextContext({
@@ -491,38 +647,16 @@ async function readBoundedTextContext({
     const content = await readBlobText({ repoRoot, oid, env, maximumBytes: maximumContextBytes, label, signal });
     return { content, contextDisposition: 'complete', contentSha256: hashBuffer(Buffer.from(content)) };
   }
-  const result = await runProcess({
-    command: 'git',
-    args: ['cat-file', 'blob', oid],
-    cwd: repoRoot,
+  return await readStreamedBlobContext({
+    repoRoot,
+    oid,
+    blobSize,
+    maximumContextBytes,
     env,
-    timeoutMs: 120_000,
-    maximumStdoutBytes: blobSize,
+    label,
+    omissionLabel,
     signal,
   });
-  if (result.code !== 0) {
-    throw new AutomaticCommitError('GIT_COMMAND_FAILED', `git cat-file failed while reading ${label}.`);
-  }
-  const content = result.stdout.toString('utf8');
-  if (content.includes('\uFFFD')) {
-    return {
-      content: `[${omissionLabel} body omitted: ${blobSize} bytes, non-UTF-8, blob ${oid}]`,
-      contextDisposition: 'metadata-only',
-      contentSha256: hashBuffer(result.stdout),
-    };
-  }
-  const marker = `\n\n[${omissionLabel} body omitted between bounded excerpts of ${blobSize} bytes; blob ${oid}]\n\n`;
-  const excerptBytes = Math.max(0, maximumContextBytes - Buffer.byteLength(marker));
-  const contentBuffer = Buffer.from(content);
-  const headBytes = Math.ceil(excerptBytes * 0.7);
-  const tailBytes = Math.max(0, excerptBytes - headBytes);
-  const head = decodeUtf8Head(contentBuffer.subarray(0, headBytes));
-  const tail = decodeUtf8Tail(contentBuffer.subarray(Math.max(headBytes, contentBuffer.length - tailBytes)));
-  return {
-    content: `${head}${marker}${tail}`,
-    contextDisposition: 'bounded-excerpt',
-    contentSha256: hashBuffer(result.stdout),
-  };
 }
 
 function createBoundedExcerpt(content, maximumBytes, { label, bodyLabel }) {
@@ -582,53 +716,25 @@ async function scanMetadataOnlyBlobsForSecrets({ repoRoot, manifest, blobSizes, 
     seenOids.add(change.newOid);
     pendingOids.push(change.newOid);
   }
-  for (let start = 0; start < pendingOids.length;) {
-    const batch = [];
-    let batchBlobBytes = 0;
-    while (start < pendingOids.length) {
-      const oid = pendingOids[start];
-      const blobSize = blobSizes.get(oid) || 0;
-      if (batch.length > 0 && batchBlobBytes + blobSize > MAX_SECRET_SCAN_BATCH_BYTES) break;
-      batch.push({ oid, blobSize });
-      batchBlobBytes += blobSize;
-      start += 1;
-    }
-    const result = await runProcess({
+  for (let start = 0; start < pendingOids.length; start += SECRET_SCAN_OID_BATCH_SIZE) {
+    const batch = pendingOids
+      .slice(start, start + SECRET_SCAN_OID_BATCH_SIZE)
+      .map((oid) => ({ oid, blobSize: blobSizes.get(oid) || 0 }));
+    const parser = createMetadataOnlyBatchParser(batch);
+    const result = await runProcessStreaming({
       command: 'git',
       args: ['cat-file', '--batch'],
       cwd: repoRoot,
       env,
       input: `${batch.map(({ oid }) => oid).join('\n')}\n`,
       timeoutMs: 120_000,
-      maximumStdoutBytes: batchBlobBytes + (batch.length * 160),
       signal,
+      onStdoutChunk: (chunk) => parser.push(chunk),
     });
     if (result.code !== 0) {
       throw new AutomaticCommitError('GIT_COMMAND_FAILED', 'git cat-file failed while scanning metadata-only content.');
     }
-    let offset = 0;
-    for (const expected of batch) {
-      const headerEnd = result.stdout.indexOf(10, offset);
-      if (headerEnd < 0) throw new AutomaticCommitError('INVALID_GIT_OUTPUT', 'Missing git cat-file batch header.');
-      const header = result.stdout.subarray(offset, headerEnd).toString('utf8');
-      const match = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(header);
-      if (!match || match[1] !== expected.oid || Number.parseInt(match[2], 10) !== expected.blobSize) {
-        throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `Unexpected git cat-file batch row: ${header}`);
-      }
-      const contentStart = headerEnd + 1;
-      const contentEnd = contentStart + expected.blobSize;
-      if (contentEnd >= result.stdout.length || result.stdout[contentEnd] !== 10) {
-        throw new AutomaticCommitError('INVALID_GIT_OUTPUT', `Incomplete git cat-file content for ${expected.oid}.`);
-      }
-      const secretViolation = findSecretViolation(result.stdout.subarray(contentStart, contentEnd).toString('latin1'));
-      if (secretViolation) {
-        throw new AutomaticCommitError(
-          'SECRET_DETECTED',
-          `A high-confidence ${secretViolation} signature was found in metadata-only staged content; no model was called.`,
-        );
-      }
-      offset = contentEnd + 1;
-    }
+    parser.finish();
   }
 }
 
@@ -805,16 +911,13 @@ export async function buildEvidencePacket({ repoRoot, baseOid, branch, repositor
     signal,
   });
   const changedPaths = [...new Set(changes.flatMap((change) => [change.oldPath, change.path]).filter(Boolean))];
-  const lfsTrackedPaths = await readLfsTrackedPaths({
-    repoRoot,
-    changedPaths,
-    env: snapshot.snapshotEnv,
-    signal,
-  });
-  assertSafeChangedPathsAndBlobs({ changes, blobSizes, stageMap: snapshot.stageMap, lfsTrackedPaths });
+  assertSafeChangedPaths({ changes, stageMap: snapshot.stageMap });
 
   // Model context is finite even when a Git snapshot is not. Preserve every raw path through safety and
   // work-spec discovery, then progressively summarize coherent path cohorts instead of rejecting a large sweep.
+  // Blob size controls evidence detail, never commit eligibility; every omitted blob retained by the frozen tree
+  // is still fully streamed through the secret scanner before any repository content reaches a model. Deleted
+  // base blobs need no scan when their bodies are omitted because they reach neither the model nor the commit.
   const evidenceManifest = buildEvidenceManifest({ changes, blobSizes, stageMap: snapshot.stageMap });
   const { manifest, evidenceIdByRawChangeId } = evidenceManifest;
   await scanMetadataOnlyBlobsForSecrets({

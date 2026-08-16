@@ -35,6 +35,7 @@ import {
   validateLunaReport,
   validateFinalMessage,
 } from '../bin/auto-commit.js';
+import { createIncrementalSecretScanner } from '../src/evidence-packet.js';
 import { runProcess } from '../src/git-snapshot.js';
 
 const AUTOMATIC_COMMIT_CLI = path.resolve('bin/auto-commit.js');
@@ -1568,23 +1569,47 @@ describe.sequential('automatic commit core flow', () => {
     expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
   });
 
-  it('accounts for oversized text as metadata without sending its body to a model', async () => {
+  it('commits a generated text blob above 10 MiB without sending its body to a model', async () => {
     const repoRoot = await createRepository();
     const codexBin = await createFakeCodex(repoRoot);
     const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
-    process.env.FAKE_CODEX_LOG = logPath;
-    const marker = 'UNIQUE_METADATA_ONLY_BODY_MARKER';
-    await writeRepoFile(repoRoot, 'generated/reference.txt', `${marker}\n${'x'.repeat(600_000)}\n`);
+    const generatedPath = 'tools/sdk-site/public/docs/reference/api.json';
+    const marker = 'GENERATED_API_BODY_MUST_NOT_ENTER_MODEL_CONTEXT';
+    const expectedBlobSize = (10 * 1024 * 1024) + 1;
+    const prefix = `{"description":"${marker}","padding":"`;
+    const suffix = '"}\n';
+    await writeRepoFile(
+      repoRoot,
+      generatedPath,
+      `${prefix}${'x'.repeat(expectedBlobSize - Buffer.byteLength(prefix) - Buffer.byteLength(suffix))}${suffix}`,
+    );
 
-    const result = await runAutomaticCommitOnce({ repoRoot, codexBin });
+    const result = await execFileAsync(process.execPath, [AUTOMATIC_COMMIT_CLI, '--once', '--codex-bin', codexBin], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, FAKE_CODEX_LOG: logPath },
+      timeout: 30_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
 
-    expect(result.status).toBe('committed');
-    const [lunaCall] = await readFakeCalls(logPath);
-    expect(lunaCall.prompt).toContain('"path":"generated/reference.txt"');
-    expect(lunaCall.prompt).toContain('"metadataOnly":true');
-    expect(lunaCall.prompt).not.toContain(marker);
-    expect((await git(repoRoot, ['cat-file', '-s', 'HEAD:generated/reference.txt'])).trim()).toBe('600034');
-  });
+    expect(result.stdout).toMatch(/^Committed [0-9a-f]{12} /u);
+    expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('2\n');
+    const calls = await readFakeCalls(logPath);
+    expect(selectEvidenceCalls(calls)).toHaveLength(1);
+    expect(selectWriterCalls(calls)).toHaveLength(1);
+    expect(calls.every((call) => !call.prompt.includes(marker))).toBe(true);
+    const packet = parsePromptEnvelope(selectEvidenceCalls(calls)[0].prompt, 'snapshot_packet');
+    expect(packet.manifest).toEqual([
+      expect.objectContaining({
+        path: generatedPath,
+        blobSize: expectedBlobSize,
+        metadataOnly: true,
+        evidenceDisposition: 'oversized-content',
+      }),
+    ]);
+    expect(packet.patches).toEqual([]);
+    expect((await git(repoRoot, ['cat-file', '-s', `HEAD:${generatedPath}`])).trim()).toBe(String(expectedBlobSize));
+  }, 35_000);
 
   it('applies published long-context pricing per model invocation', async () => {
     const repoRoot = await createRepository();
@@ -1639,11 +1664,27 @@ describe.sequential('automatic commit core flow', () => {
     const logPath = path.join(repoRoot, '.git', 'fake-codex.log');
     process.env.FAKE_CODEX_LOG = logPath;
     const secret = ['AKIA', '1234567890ABCDEF'].join('');
-    await writeRepoFile(repoRoot, 'generated/reference.txt', `${secret}\n${'x'.repeat(600_000)}\n`);
+    await writeRepoFile(
+      repoRoot,
+      'generated/reference.txt',
+      `${'x'.repeat((10 * 1024 * 1024) + 32)}\n${secret}\n`,
+    );
 
     await expect(runAutomaticCommitOnce({ repoRoot, codexBin })).rejects.toMatchObject({ code: 'SECRET_DETECTED' });
     await expect(fs.stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await git(repoRoot, ['rev-list', '--count', 'HEAD'])).toBe('1\n');
+  }, 35_000);
+
+  it('detects a secret signature split across incremental scan chunks', () => {
+    const scanner = createIncrementalSecretScanner();
+
+    expect(scanner.push(Buffer.from('prefix\nAKIA123456'))).toBeNull();
+    expect(scanner.push(Buffer.from('7890ABCDEF\nsuffix'))).toBe('AWS access key');
+
+    const firstBlobScanner = createIncrementalSecretScanner();
+    const secondBlobScanner = createIncrementalSecretScanner();
+    expect(firstBlobScanner.push(Buffer.from('AKIA123456'))).toBeNull();
+    expect(secondBlobScanner.push(Buffer.from('7890ABCDEF'))).toBeNull();
   });
 
   it('refuses an executable commit-message hook before staging a commit', async () => {
